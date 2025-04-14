@@ -1,0 +1,24 @@
+{
+  "name": "nightreignbot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@discordjs/voice": "^0.18.0",
+    "axios": "^1.7.9",
+    "discord.js": "^14.17.2",
+    "dotenv": "^16.4.7",
+    "google-tts-api": "^2.0.2",
+    "node-cron": "^3.0.3",
+    "sqlite3": "^5.1.7",
+    "undici": "^7.3.0",
+    "winston": "^3.17.0"
+  },
+  "type": "commonjs",
+  "description": ""
+}
