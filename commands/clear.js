@@ -1,6 +1,7 @@
 const { SlashCommandBuilder } = require("discord.js");
 const { hasModRole } = require("../utils/permissions");
 const { getPlayerById, deletePlayer } = require("../utils/deleteplayer");
+const db = require("../database");
 
 module.exports = {
   data: new SlashCommandBuilder()

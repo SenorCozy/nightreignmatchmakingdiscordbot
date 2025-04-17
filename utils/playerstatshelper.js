@@ -1,5 +1,5 @@
 // utils/playerStats.js
-
+const db = require("../database");
 function fetchPlayerStatistics(playerId) {
   return new Promise((resolve, reject) => {
     db.get(
@@ -120,10 +120,51 @@ function clearPlayerStatistics(playerId) {
     }
   });
 }
+async function trackFailedReadyCheck(playerId) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `
+      INSERT INTO player_statistics (id, failed_ready_checks)
+      VALUES (?, 1)
+      ON CONFLICT(id) DO UPDATE SET failed_ready_checks = failed_ready_checks + 1
+    `,
+      [playerId],
+      (err) => {
+        if (err) {
+          logger.error("Error tracking failed ready check:", err.message);
+          return reject(err);
+        }
+        resolve();
+      }
+    );
+  });
+}
+
+async function trackLongestMatchTime(playerId, matchTime) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      `
+      UPDATE player_statistics
+      SET longest_match_time = MAX(longest_match_time, ?)
+      WHERE id = ?
+    `,
+      [matchTime, playerId],
+      (err) => {
+        if (err) {
+          logger.error("Error tracking longest match time:", err.message);
+          return reject(err);
+        }
+        resolve();
+      }
+    );
+  });
+}
 
 module.exports = {
   fetchPlayerStatistics,
   fetchMostCommonDuoPartner,
   clearAllStatistics,
   clearPlayerStatistics,
+  trackFailedReadyCheck,
+  trackLongestMatchTime,
 };

@@ -67,7 +67,9 @@ const db = new sqlite3.Database(dbPath, (err) => {
         queue_left_at INTEGER DEFAULT NULL,
         duoPartner TEXT DEFAULT NULL,
         status TEXT DEFAULT 'completed',  -- Ensures tracking of queue completion
-        platform TEXT DEFAULT 'unknown'  -- Fixes missing platform column
+        platform TEXT DEFAULT 'unknown',  -- Fixes missing platform column
+        failed_ready_checks INTEGER DEFAULT 0,
+        longest_match_time INTEGER DEFAULT 0
       )
     `);
 

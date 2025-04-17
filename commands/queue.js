@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
 require("dotenv").config();
 const { hasModRole } = require("../utils/permissions");
+const db = require("../database");
 
 const platformAliases = {
   ps: "playstation",

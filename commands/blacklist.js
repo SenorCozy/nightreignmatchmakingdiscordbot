@@ -1,5 +1,6 @@
 const { SlashCommandBuilder } = require("discord.js");
 const { hasModRole } = require("../utils/permissions");
+const db = require("../database");
 
 module.exports = {
   data: new SlashCommandBuilder()

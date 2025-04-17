@@ -1,5 +1,5 @@
 const { ChannelType } = require("discord.js");
-
+const db = require("../database");
 async function deleteBotThreadsAndVoiceChannels(guild) {
   try {
     const allThreads = await guild.channels.fetchActiveThreads();

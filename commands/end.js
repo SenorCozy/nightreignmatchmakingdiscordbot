@@ -5,6 +5,7 @@ const {
   ButtonStyle,
   ComponentType,
 } = require("discord.js");
+const db = require("../database");
 
 require("dotenv").config();
 const { hasQueueModRole } = require("../utils/permissions");

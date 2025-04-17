@@ -1,4 +1,5 @@
 // utils/stats.js
+const db = require("../database");
 
 function fetchBotStatistics() {
   return new Promise((resolve, reject) => {
@@ -30,6 +31,49 @@ function fetchTopPlayers(limit) {
     );
   });
 }
+async function updateGlobalLongestMatch(matchTime) {
+  try {
+    const currentMax = await new Promise((resolve, reject) => {
+      db.get(
+        `SELECT stat_value FROM bot_statistics WHERE stat_key = 'longest_match_time'`,
+        [],
+        (err, row) => {
+          if (err) {
+            logger.error("Error fetching longest match time:", err.message);
+            return reject(err);
+          }
+          resolve(row?.stat_value || 0);
+        }
+      );
+    });
+
+    if (matchTime > currentMax) {
+      await new Promise((resolve, reject) => {
+        db.run(
+          `INSERT INTO bot_statistics (stat_key, stat_value)
+           VALUES ('longest_match_time', ?)
+           ON CONFLICT(stat_key) DO UPDATE SET stat_value = excluded.stat_value`,
+          [matchTime],
+          (err) => {
+            if (err) {
+              logger.error(
+                "Error updating global longest match time:",
+                err.message
+              );
+              return reject(err);
+            }
+            logger.info(
+              `✅ Updated global longest match time to ${matchTime}ms`
+            );
+            resolve();
+          }
+        );
+      });
+    }
+  } catch (error) {
+    logger.error("Error in updateGlobalLongestMatch:", error.message);
+  }
+}
 
 function fetchAverageQueueTimes() {
   return new Promise((resolve, reject) => {
@@ -57,4 +101,5 @@ module.exports = {
   fetchBotStatistics,
   fetchTopPlayers,
   fetchAverageQueueTimes,
+  updateGlobalLongestMatch,
 };

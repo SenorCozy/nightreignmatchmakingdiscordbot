@@ -5,6 +5,7 @@ const {
   ButtonStyle,
   ComponentType,
 } = require("discord.js");
+const db = require("../database");
 
 const { hasModRole } = require("../utils/permissions");
 const {

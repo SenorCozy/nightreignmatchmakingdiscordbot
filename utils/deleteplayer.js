@@ -1,5 +1,5 @@
 // utils/player.js
-
+const db = require("../database");
 function deletePlayer(playerId) {
   return new Promise((resolve, reject) => {
     db.run(`DELETE FROM players WHERE id = ?`, [playerId], (err) => {

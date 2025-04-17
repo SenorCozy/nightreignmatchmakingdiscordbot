@@ -4,6 +4,7 @@ const {
   fetchTopPlayers,
   fetchAverageQueueTimes,
 } = require("../utils/botstatshelper");
+const db = require("../database");
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -41,6 +42,21 @@ module.exports = {
       const statMap = Object.fromEntries(
         stats.map((row) => [row.stat_key, row.stat_value])
       );
+
+      // Get total failed ready checks across all players
+      const failedReadyChecks = await new Promise((resolve, reject) => {
+        db.get(
+          `SELECT SUM(failed_ready_checks) AS total FROM player_statistics`,
+          [],
+          (err, row) => {
+            if (err) {
+              logger.error("Error fetching failed ready checks:", err.message);
+              return reject(err);
+            }
+            resolve(row?.total || 0);
+          }
+        );
+      });
 
       const avgMatchLength = statMap.total_match_time
         ? (
@@ -88,6 +104,7 @@ module.exports = {
   - Solo: ${statMap.queue_entries_solo || 0}
   - Duo: ${statMap.queue_entries_duo || 0}
 - **Total Matches Created:** ${statMap.total_matches_created || 0}
+- **Failed Ready Checks:** ${failedReadyChecks}
 - **Average Match Length:** ${avgMatchLength} seconds
 - **Longest Match Length:** ${(statMap.longest_match_time / 1000 || 0).toFixed(
         2

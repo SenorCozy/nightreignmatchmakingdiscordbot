@@ -1,4 +1,5 @@
 const { SlashCommandBuilder } = require("discord.js");
+const db = require("../database");
 
 async function searchForPlayers(thread, requestedPlayers, interaction = null) {
   try {

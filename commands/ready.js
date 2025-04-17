@@ -1,5 +1,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
+const db = require("../database");
 
+let activeReadyChecks = new Map();
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("ready")

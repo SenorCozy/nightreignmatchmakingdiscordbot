@@ -1,5 +1,10 @@
 const { SlashCommandBuilder } = require("discord.js");
 const { hasModRole } = require("../utils/permissions");
+const db = require("../database");
+const {
+  startMatchmakingLoop,
+  stopMatchmakingLoop,
+} = require("../utils/matchmaking/matchmakingLoop");
 
 module.exports = {
   data: new SlashCommandBuilder()
