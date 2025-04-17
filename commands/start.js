@@ -43,12 +43,16 @@ module.exports = {
         .setThumbnail("https://your-image-link.com");
 
       await interaction.reply({ embeds: [embed], components: [row] });
-    } catch (error) {
-      logger.error("Error executing /start command:", error.message);
-      await interaction.reply({
-        content: "❌ An error occurred while displaying the queue interface.",
-        flags: 64,
-      });
+    } catch (err) {
+      console.error("❌ Error in /start:", err);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply("❌ Failed to start match.");
+      } else {
+        await interaction.reply({
+          content: "❌ Failed to start match.",
+          flags: 64,
+        });
+      }
     }
   },
 };

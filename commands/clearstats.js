@@ -10,7 +10,7 @@ const { hasModRole } = require("../utils/permissions");
 const {
   clearPlayerStatistics,
   clearAllStatistics,
-} = require("../utils/playerStats");
+} = require("../utils/playerstatshelper");
 
 module.exports = {
   data: new SlashCommandBuilder()
