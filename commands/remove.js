@@ -30,87 +30,99 @@ module.exports = {
     }
 
     try {
-      // Fetch match
-      const match = await new Promise((resolve, reject) => {
+      // Get match_id
+      const matchInfo = await new Promise((resolve, reject) => {
         db.get(
-          `SELECT playerIds, voiceChannelId FROM channels WHERE threadId = ?`,
+          `SELECT matches.match_id, voiceChannelId FROM matches 
+           JOIN channels ON matches.thread_id = channels.threadId 
+           WHERE matches.thread_id = ?`,
           [thread.id],
           (err, row) => (err ? reject(err) : resolve(row))
         );
       });
 
-      if (!match) {
+      const { match_id, voiceChannelId } = matchInfo || {};
+      if (!match_id) {
         return interaction.reply({
           content: "❌ This thread is not part of an active match.",
           flags: 64,
         });
       }
 
-      let playerIds = match.playerIds.split(",").filter(Boolean);
-      if (!playerIds.includes(playerId)) {
+      // ✅ Concurrency check
+      const isInProgress = await new Promise((resolve, reject) => {
+        db.get(
+          `SELECT leave_in_progress FROM match_players WHERE match_id = ? AND playerId = ?`,
+          [match_id, playerId],
+          (err, row) =>
+            err ? reject(err) : resolve(row?.leave_in_progress === 1)
+        );
+      });
+
+      if (isInProgress) {
         return interaction.reply({
-          content: `⚠️ <@${playerId}> is not part of this match.`,
+          content: "⚠️ This player is already being removed.",
           flags: 64,
         });
       }
 
-      // Update DB
-      const updatedPlayerIds = playerIds.filter((id) => id !== playerId);
-      await new Promise((resolve, reject) => {
-        db.run(
-          `UPDATE channels SET playerIds = ? WHERE threadId = ?`,
-          [updatedPlayerIds.join(","), thread.id],
-          (err) => (err ? reject(err) : resolve())
-        );
-      });
+      // ✅ Set leave_in_progress = 1
+      await db.run(
+        `UPDATE match_players SET leave_in_progress = 1 WHERE match_id = ? AND playerId = ?`,
+        [match_id, playerId]
+      );
 
-      await new Promise((resolve, reject) => {
-        db.run(`DELETE FROM players WHERE id = ?`, [playerId], (err) =>
-          err ? reject(err) : resolve()
-        );
-      });
+      // ✅ Update match_players
+      await db.run(
+        `UPDATE match_players SET status = 'removed' WHERE match_id = ? AND playerId = ?`,
+        [match_id, playerId]
+      );
 
-      // Remove from thread
-      try {
-        await thread.members.remove(playerId);
-      } catch (err) {
-        logger.warn(
-          `⚠️ Could not remove ${playerId} from thread: ${err.message}`
-        );
-      }
+      // ✅ Log match event with final_status
+      await db.run(
+        `INSERT INTO match_events (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
+         VALUES (?, ?, ?, 'kick', ?, ?, ?)`,
+        [
+          match_id,
+          thread.id,
+          playerId,
+          Date.now(),
+          "Removed via /remove",
+          "removed_by_moderator",
+        ]
+      );
 
-      try {
-        await thread.permissionOverwrites.edit(playerId, {
-          ViewChannel: false,
-          SendMessages: false,
-        });
-      } catch (err) {
-        logger.warn(`⚠️ Could not update thread permissions: ${err.message}`);
-      }
+      // ✅ Remove from players table
+      await db.run(`DELETE FROM players WHERE id = ?`, [playerId]);
 
-      // Remove from VC
-      if (match.voiceChannelId) {
-        const voiceChannel = thread.guild.channels.cache.get(
-          match.voiceChannelId
-        );
-        if (voiceChannel) {
-          try {
-            await voiceChannel.permissionOverwrites.edit(playerId, {
+      // ✅ Remove from thread
+      await thread.members.remove(playerId).catch(() => {});
+
+      // ✅ Remove from VC
+      if (voiceChannelId) {
+        const vc = thread.guild.channels.cache.get(voiceChannelId);
+        if (vc) {
+          await vc.permissionOverwrites
+            .edit(playerId, {
               ViewChannel: false,
               Connect: false,
-            });
-          } catch (err) {
-            logger.warn(`⚠️ Could not update VC permissions: ${err.message}`);
-          }
+            })
+            .catch(() => {});
         }
       }
 
+      // ✅ Reset leave_in_progress
+      await db.run(
+        `UPDATE match_players SET leave_in_progress = 0 WHERE match_id = ? AND playerId = ?`,
+        [match_id, playerId]
+      );
+
       return interaction.reply({
-        content: `✅ <@${playerId}> has been removed from the match and stripped of access.`,
+        content: `✅ <@${playerId}> has been removed from the match and stripped of access. Please use /search to attempt to replace this player from the queue if desired.`,
         flags: 64,
       });
     } catch (error) {
-      logger.error("❌ Error in /remove:", error);
+      console.error("❌ Error in /remove:", error);
       return interaction.reply({
         content: "❌ An error occurred while removing the user.",
         flags: 64,

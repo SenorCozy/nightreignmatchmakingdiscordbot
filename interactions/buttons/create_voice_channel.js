@@ -4,7 +4,6 @@ const {
   ButtonBuilder,
   ActionRowBuilder,
 } = require("discord.js");
-const logger = require("../utils/logger");
 const db = require("../../database");
 
 module.exports = {
@@ -16,32 +15,44 @@ module.exports = {
     try {
       await interaction.deferReply({ flags: 64 }).catch(() => {});
 
-      const dbResult = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT playerIds, voiceChannelId FROM channels WHERE threadId = ?`,
-          [thread.id],
-          (err, row) => {
-            if (err) return reject(err);
-            resolve(row);
-          }
-        );
-      });
+      // ✅ Get match_id and check if VC already exists
+      const { match_id, voiceChannelId } = await new Promise(
+        (resolve, reject) => {
+          db.get(
+            `SELECT match_id, voiceChannelId FROM channels WHERE threadId = ?`,
+            [thread.id],
+            (err, row) => (err ? reject(err) : resolve(row || {}))
+          );
+        }
+      );
 
-      if (!dbResult || !dbResult.playerIds) {
+      if (!match_id) {
         return interaction
-          .editReply({ content: "❌ No players found for this match." })
+          .editReply({ content: "❌ No match found for this thread." })
           .catch(() => {});
       }
-
-      const { playerIds, voiceChannelId } = dbResult;
-      const players = playerIds.split(",");
 
       if (voiceChannelId) {
         return interaction
           .editReply({
-            content:
-              "⚠️ A voice channel has already been created for this match.",
+            content: "⚠️ A voice channel already exists for this match.",
           })
+          .catch(() => {});
+      }
+
+      // ✅ Get active match players from match_players
+      const activePlayers = await new Promise((resolve, reject) => {
+        db.all(
+          `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
+          [match_id],
+          (err, rows) =>
+            err ? reject(err) : resolve(rows.map((r) => r.playerId))
+        );
+      });
+
+      if (!activePlayers.length) {
+        return interaction
+          .editReply({ content: "❌ No active players found for this match." })
           .catch(() => {});
       }
 
@@ -55,20 +66,24 @@ module.exports = {
       }
 
       const totalChannels = interaction.guild.channels.cache.size;
-      const channelLimitReached = totalChannels >= 500;
-
-      if (channelLimitReached) {
+      if (totalChannels >= 500) {
         return interaction
           .editReply({
             content:
-              "⚠️ Cannot create a voice channel. This server is at the 500 channel limit.",
+              "⚠️ Cannot create a voice channel. Server channel limit reached.",
           })
           .catch(() => {});
       }
+      const moderatorRoleIds = [
+        process.env.TICKET_HANDLER_ROLE,
+        process.env.ELDEN_MODERATOR_ROLE,
+        process.env.ELDEN_ENFORCER_ROLE,
+        process.env.BOT_ROLE,
+      ].filter(Boolean);
 
-      // ✅ Create the voice channel
+      // ✅ Create the voice channel with proper permissions
       const voiceChannel = await interaction.guild.channels.create({
-        name: `match-voice-${players.join("-")}`,
+        name: `match-voice-${activePlayers.join("-")}`,
         type: ChannelType.GuildVoice,
         parent: parentChannel.parent.id,
         permissionOverwrites: [
@@ -79,7 +94,8 @@ module.exports = {
               PermissionsBitField.Flags.Connect,
             ],
           },
-          ...players.map((id) => ({
+          // ✅ Grant access to match players
+          ...activePlayers.map((id) => ({
             id,
             allow: [
               PermissionsBitField.Flags.ViewChannel,
@@ -87,18 +103,31 @@ module.exports = {
               PermissionsBitField.Flags.Speak,
             ],
           })),
+          // ✅ Grant access to moderators/staff
+          ...moderatorRoleIds.map((roleId) => ({
+            id: roleId,
+            allow: [
+              PermissionsBitField.Flags.ViewChannel,
+              PermissionsBitField.Flags.Connect,
+              PermissionsBitField.Flags.Speak,
+              PermissionsBitField.Flags.MuteMembers,
+              PermissionsBitField.Flags.MoveMembers,
+            ],
+          })),
         ],
       });
 
-      logger.info(`✅ Voice channel created: ${voiceChannel.name}`);
+      console.info(`✅ Voice channel created: ${voiceChannel.name}`);
 
+      // ✅ Store voiceChannelId in the DB
       db.run(
         `UPDATE channels SET voiceChannelId = ? WHERE threadId = ?`,
         [voiceChannel.id, thread.id],
         (err) => {
           if (err) {
-            logger.error(
-              `❌ Failed to store voiceChannelId in DB: ${err.message}`
+            console.error(
+              "❌ Failed to store voiceChannelId in DB:",
+              err.message
             );
           }
         }
@@ -113,11 +142,9 @@ module.exports = {
         flags: 64,
       });
     } catch (error) {
-      logger.error(`❌ Error handling create_voice_channel: ${error.message}`);
+      console.error("❌ Error handling create_voice_channel:", error.message);
       return interaction
-        .editReply({
-          content: "❌ An error occurred while creating the voice channel.",
-        })
+        .editReply({ content: "❌ Failed to create the voice channel." })
         .catch(() => {});
     }
   },

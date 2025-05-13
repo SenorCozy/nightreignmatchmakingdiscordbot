@@ -76,7 +76,7 @@ module.exports = {
         flags: 64,
       });
     } catch (error) {
-      logger.error("join_queue error:", error.message);
+      console.error("join_queue error:", error.message);
       return interaction.reply({
         content: "❌ Something went wrong while joining the queue.",
         flags: 64,

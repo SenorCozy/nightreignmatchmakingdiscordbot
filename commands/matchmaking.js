@@ -4,7 +4,11 @@ const db = require("../database");
 const {
   startMatchmakingLoop,
   stopMatchmakingLoop,
-} = require("../utils/matchmaking/matchmakingLoop");
+  restartMatchmakingLoop,
+} = require("../utils/matchmakingUtils/matchmakingLoop");
+const {
+  loadMatchmakingSettings,
+} = require("../utils/matchmakingUtils/loadMatchmakingSettings");
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -32,6 +36,9 @@ module.exports = {
     )
     .addSubcommand((sub) =>
       sub.setName("resume").setDescription("Resume the matchmaking system")
+    )
+    .addSubcommand((sub) =>
+      sub.setName("status").setDescription("Show current matchmaking status")
     ),
 
   async execute(interaction) {
@@ -56,11 +63,10 @@ module.exports = {
           );
         });
 
-        clearInterval(matchmakingLoop);
-        matchmakingInterval = newInterval;
-        startMatchmakingLoop();
+        const { matchmakingInterval } = await loadMatchmakingSettings();
+        restartMatchmakingLoop(interaction.client, db, matchmakingInterval);
 
-        logger.info(`✅ Matchmaking interval updated to ${newInterval}ms`);
+        console.info(`✅ Matchmaking interval updated to ${newInterval}ms`);
         return interaction.reply({
           content: `⏳ Matchmaking interval updated to **${
             newInterval / 1000
@@ -78,7 +84,7 @@ module.exports = {
           );
         });
 
-        logger.info(`⏸️ Matchmaking paused by ${interaction.user.tag}`);
+        console.info(`⏸️ Matchmaking paused by ${interaction.user.tag}`);
         return interaction.reply({
           content:
             "⏸️ Matchmaking has been **paused**. Players can still queue, but no matches will be created.",
@@ -94,16 +100,35 @@ module.exports = {
             (err) => (err ? reject(err) : resolve())
           );
         });
+        const { matchmakingInterval } = await loadMatchmakingSettings();
+        restartMatchmakingLoop(interaction.client, db, matchmakingInterval);
 
-        logger.info(`▶️ Matchmaking resumed by ${interaction.user.tag}`);
+        console.info(`▶️ Matchmaking resumed by ${interaction.user.tag}`);
         return interaction.reply({
           content:
             "▶️ Matchmaking has **resumed**. Matches will be created again based on the queue.",
           flags: 64,
         });
       }
+
+      if (subcommand === "status") {
+        const { matchmakingPaused, matchmakingInterval } =
+          await loadMatchmakingSettings();
+
+        const statusMsg =
+          `📊 **Matchmaking Status:**\n` +
+          `🔄 **Paused:** ${matchmakingPaused ? "Yes" : "No"}\n` +
+          `⏱️ **Interval:** ${matchmakingInterval} ms (${Math.round(
+            matchmakingInterval / 1000
+          )} seconds)`;
+
+        return interaction.reply({
+          content: statusMsg,
+          flags: 64,
+        });
+      }
     } catch (err) {
-      logger.error(`❌ Error in /matchmaking ${subcommand}:`, err);
+      console.error(`❌ Error in /matchmaking ${subcommand}:`, err);
       return interaction.reply({
         content:
           "❌ An unexpected error occurred while executing this command.",

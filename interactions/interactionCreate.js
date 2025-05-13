@@ -1,18 +1,33 @@
 const fs = require("fs");
 const path = require("path");
-const { InteractionType } = require("discord.js");
+const { logger } = require("../logger"); // Make sure you have this
 
 const buttonHandlers = new Map();
 const regexHandlers = [];
+const commandHandlers = new Map();
+const modalHandlers = new Map();
 
-// Load button handlers
+const modalPath = path.join(__dirname, "modals");
+if (fs.existsSync(modalPath)) {
+  const modalFiles = fs
+    .readdirSync(modalPath)
+    .filter((file) => file.endsWith(".js"));
+
+  for (const file of modalFiles) {
+    const modal = require(path.join(modalPath, file));
+    if (modal?.customId && typeof modal.execute === "function") {
+      modalHandlers.set(modal.customId, modal.execute);
+    }
+  }
+}
+
+// Load button handlers from interactions/buttons
 const buttonFiles = fs
   .readdirSync(path.join(__dirname, "buttons"))
   .filter((file) => file.endsWith(".js"));
 
 for (const file of buttonFiles) {
   const button = require(`./buttons/${file}`);
-
   if (button.customId && typeof button.execute === "function") {
     buttonHandlers.set(button.customId, button.execute);
   } else if (button.regex && typeof button.execute === "function") {
@@ -20,38 +35,55 @@ for (const file of buttonFiles) {
   }
 }
 
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("Unhandled Rejection:", reason);
-});
+// Load command handlers from ../commands (root level)
+const commandsPath = path.join(__dirname, "..", "commands");
+const commandFiles = fs
+  .readdirSync(commandsPath)
+  .filter((file) => file.endsWith(".js"));
 
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught Exception:", err);
-});
+for (const file of commandFiles) {
+  const command = require(path.join(commandsPath, file));
+  if (command.data && typeof command.execute === "function") {
+    commandHandlers.set(command.data.name, command.execute);
+  }
+}
 
 module.exports = async (interaction) => {
-  if (!interaction.isButton()) return;
-
-  const customId = interaction.customId.toLowerCase();
-
   try {
-    // Exact match
-    if (buttonHandlers.has(customId)) {
-      return await buttonHandlers.get(customId)(interaction);
-    }
+    if (interaction.isButton()) {
+      const customId = interaction.customId.toLowerCase();
 
-    // Regex match
-    const matched = regexHandlers.find((b) => b.regex.test(customId));
-    if (matched) {
-      return await matched.execute(interaction);
-    }
+      if (buttonHandlers.has(customId)) {
+        return await buttonHandlers.get(customId)(interaction);
+      }
 
-    // No match found
-    logger.warn(`⚠️ No button handler found for customId: ${customId}`);
+      const matched = regexHandlers.find((b) => b.regex.test(customId));
+      if (matched) {
+        console.info(`🔧 Routed to regex handler for ${customId}`);
+        return await matched.execute(interaction);
+      }
+
+      console.warn(`⚠️ No button handler found for customId: ${customId}`);
+    } else if (interaction.isCommand()) {
+      const handler = commandHandlers.get(interaction.commandName);
+      if (handler) {
+        await handler(interaction);
+      }
+    } else if (interaction.isModalSubmit()) {
+      const handler = modalHandlers.get(interaction.customId);
+      if (handler) {
+        return await handler(interaction);
+      } else {
+        console.warn(
+          `⚠️ No modal handler for customId: ${interaction.customId}`
+        );
+      }
+    }
   } catch (error) {
-    logger.error(`❌ Error handling button ${customId}:`, error);
+    console.error(`❌ Error handling interaction:`, error);
 
     const errorReply = {
-      content: "❌ Something went wrong while handling this button.",
+      content: "❌ Something went wrong while handling this interaction.",
       flags: 64,
     };
 

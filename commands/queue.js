@@ -3,6 +3,11 @@ require("dotenv").config();
 const { hasModRole } = require("../utils/permissions");
 const db = require("../database");
 
+const {
+  getQueuePosition,
+  calculateAverageQueueTime,
+} = require("../utils/playerUtils");
+
 const platformAliases = {
   ps: "playstation",
   ps4: "playstation",
@@ -144,7 +149,7 @@ module.exports = {
         );
       });
 
-      logger.info(
+      console.info(
         `🧹 Queue cleared by ${interaction.user.tag} (${interaction.user.id})`
       );
 
@@ -235,6 +240,22 @@ module.exports = {
       if (blacklisted) {
         return interaction.reply({
           content: `🚫 <@${playerId}> is blacklisted and cannot enter the queue.`,
+          flags: 64,
+        });
+      }
+
+      // Prevent queuing if user is in an active match
+      const activeMatch = await new Promise((resolve, reject) => {
+        db.get(
+          `SELECT 1 FROM match_players WHERE playerId = ? AND status = 'active'`,
+          [playerId],
+          (err, row) => (err ? reject(err) : resolve(!!row))
+        );
+      });
+
+      if (activeMatch) {
+        return interaction.reply({
+          content: `🚫 <@${playerId}> is currently in an active match and cannot queue.`,
           flags: 64,
         });
       }

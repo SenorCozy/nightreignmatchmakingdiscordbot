@@ -1,22 +1,34 @@
-// utils/matchmaking/runMatchmaking.js
 const { handleOrphanedDuos } = require("../duoUtils");
 const { startMatch } = require("./startMatch");
 const {
   isPlayerInServer,
   prioritizePlatformsByQueueTime,
 } = require("../playerUtils");
-const db = require("../../database");
+
 let isMatchmakingRunning = false;
 
-async function runMatchmaking(client, db, logger) {
+async function runMatchmaking(client, db) {
+  console.log("⏳ Starting matchmaking run...");
+
   if (isMatchmakingRunning) {
-    logger.warn("🚨 Matchmaking is already running. Skipping duplicate.");
+    console.warn("🚨 Matchmaking is already running. Skipping duplicate.");
     return;
   }
 
   isMatchmakingRunning = true;
 
   try {
+    if (!client?.isReady?.()) {
+      console.warn("❌ Client not ready or undefined.");
+      return;
+    }
+
+    const guild = client.guilds.cache.first();
+    if (!guild) {
+      console.warn("❌ No guilds available.");
+      return;
+    }
+
     const matchmakingPaused = await new Promise((resolve, reject) => {
       db.get(
         `SELECT value FROM settings WHERE key = 'matchmaking_paused'`,
@@ -27,11 +39,10 @@ async function runMatchmaking(client, db, logger) {
     });
 
     if (matchmakingPaused) {
-      logger.info("🚫 Matchmaking is paused.");
+      console.info("🚫 Matchmaking is paused.");
       return;
     }
 
-    const guild = client.guilds.cache.first();
     const totalQueuedPlayers = await new Promise((resolve, reject) => {
       db.get(
         `SELECT COUNT(*) AS count FROM players WHERE status = 'queued'`,
@@ -41,7 +52,7 @@ async function runMatchmaking(client, db, logger) {
     });
 
     if (totalQueuedPlayers === 0) {
-      logger.info("🚫 No players in queue. Waiting...");
+      console.info("🚫 No players in queue.");
       return;
     }
 
@@ -50,7 +61,9 @@ async function runMatchmaking(client, db, logger) {
     for (const platform of prioritizedPlatforms) {
       const queuedPlayers = await new Promise((resolve, reject) => {
         db.all(
-          `SELECT id, duoPartner FROM players WHERE platform = ? AND status = 'queued' ORDER BY queue_entered_at ASC`,
+          `SELECT id, duoPartner FROM players 
+           WHERE platform = ? AND status = 'queued' 
+           ORDER BY queue_entered_at ASC`,
           [platform],
           (err, rows) => (err ? reject(err) : resolve(rows))
         );
@@ -65,8 +78,8 @@ async function runMatchmaking(client, db, logger) {
       const threadLimitReached =
         guild.channels.cache.filter((c) => c.isThread()).size >= 1000;
       if (threadLimitReached) {
-        logger.warn(
-          `🚨 Cannot start new match for ${platform} - thread limit reached.`
+        console.warn(
+          `🚨 Cannot start new match for ${platform} – thread limit reached.`
         );
         continue;
       }
@@ -75,7 +88,7 @@ async function runMatchmaking(client, db, logger) {
       const duos = new Map();
 
       for (const player of queuedPlayers) {
-        const isMember = await isPlayerInServer(player.id, guild);
+        const isMember = await isPlayerInServer(player.id, client);
         if (!isMember) continue;
 
         if (player.duoPartner) {
@@ -103,41 +116,65 @@ async function runMatchmaking(client, db, logger) {
 
         const existingMatch = await new Promise((resolve, reject) => {
           db.get(
-            `SELECT threadId FROM channels 
-             WHERE (playerIds LIKE ? OR playerIds LIKE ? OR playerIds LIKE ?) 
-             AND threadId IS NOT NULL LIMIT 1`,
-            [`%${match[0]}%`, `%${match[1]}%`, `%${match[2]}%`],
+            `SELECT threadId FROM match_players 
+             WHERE playerId IN (?, ?, ?) 
+             LIMIT 1`,
+            [match[0], match[1], match[2]],
             (err, row) => (err ? reject(err) : resolve(row?.threadId))
           );
         });
 
         if (existingMatch) {
-          logger.warn(`⚠️ Duplicate match prevented: ${match.join(", ")}`);
+          console.warn(`⚠️ Duplicate match prevented: ${match.join(", ")}`);
           continue;
         }
 
-        await new Promise((resolve, reject) => {
+        const placeholders = match.map(() => "?").join(", ");
+        const updatedCount = await new Promise((resolve, reject) => {
           db.run(
-            `UPDATE players SET status = 'active' WHERE id IN (${match
-              .map(() => "?")
-              .join(",")})`,
+            `UPDATE players SET status = 'active' 
+     WHERE id IN (${placeholders}) AND status = 'queued'`,
             match,
-            (err) => (err ? reject(err) : resolve())
+            function (err) {
+              if (err) return reject(err);
+              resolve(this.changes); // Number of rows affected
+            }
           );
         });
 
+        // ⚠️ If not all players were atomically marked active, skip match
+        if (updatedCount < match.length) {
+          console.warn(
+            `❌ Skipping match due to stale player state: ${match.join(", ")}`
+          );
+          // Optionally: reset any already changed back to queued
+          await new Promise((resolve, reject) => {
+            db.run(
+              `UPDATE players SET status = 'queued' 
+       WHERE id IN (${placeholders})`,
+              match,
+              (err) => (err ? reject(err) : resolve())
+            );
+          });
+          continue;
+        }
+
         try {
-          await startMatch(platform, match);
-          logger.info(`✅ Match created on ${platform}: ${match.join(", ")}`);
+          await startMatch(client, platform, match);
+          console.log(`✅ Match created on ${platform}: ${match.join(", ")}`);
         } catch (error) {
-          logger.error(`❌ Failed to start match: ${error.message}`);
+          console.log(`❌ Failed to start match: ${error.message}`);
         }
       }
     }
   } catch (error) {
-    logger.error("❌ Error in runMatchmaking:", error.message);
+    console.error("❌ Error in runMatchmaking:", {
+      message: error.message,
+      stack: error.stack,
+    });
   } finally {
     isMatchmakingRunning = false;
+    console.log("🏁 Matchmaking run completed");
   }
 }
 

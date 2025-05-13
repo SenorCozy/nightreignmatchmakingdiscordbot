@@ -5,7 +5,6 @@ const {
   ButtonStyle,
   EmbedBuilder,
 } = require("discord.js");
-const db = require("../database");
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -13,7 +12,10 @@ module.exports = {
     .setDescription("Display the matchmaking interface"),
 
   async execute(interaction) {
+    await interaction.deferReply();
     try {
+      // Defer the reply first to prevent timeout
+
       const buttonJoin = new ButtonBuilder()
         .setCustomId("join_queue")
         .setLabel("Enter Nightreign Matchmaking Queue")
@@ -43,15 +45,29 @@ module.exports = {
         .setColor("#7289DA")
         .setThumbnail("https://your-image-link.com");
 
-      await interaction.reply({ embeds: [embed], components: [row] });
+      // Edit the deferred reply
+      if (interaction.deferred) {
+        await interaction.editReply({
+          embeds: [embed],
+          components: [row],
+        });
+      } else {
+        await interaction.reply({
+          embeds: [embed],
+          components: [row],
+          flags: 64, // Optional: make it ephemeral if needed
+        });
+      }
     } catch (err) {
       console.error("❌ Error in /start:", err);
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply("❌ Failed to start match.");
+        await interaction.editReply(
+          "❌ Failed to display matchmaking interface."
+        );
       } else {
         await interaction.reply({
-          content: "❌ Failed to start match.",
-          flags: 64,
+          content: "❌ Failed to display matchmaking interface.",
+          ephemeral: true,
         });
       }
     }

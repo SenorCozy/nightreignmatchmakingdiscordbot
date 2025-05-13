@@ -11,7 +11,7 @@ async function handleOrphanedDuos(playerId) {
       [player.duoPartner],
       (err, row) => {
         if (err) {
-          logger.error("Error checking duo partner status:", err.message);
+          console.error("Error checking duo partner status:", err.message);
           return reject(err);
         }
         resolve(!!row);
@@ -26,7 +26,7 @@ async function handleOrphanedDuos(playerId) {
         [playerId],
         (err) => {
           if (err) {
-            logger.error("Error clearing orphaned duo partner:", err.message);
+            console.error("Error clearing orphaned duo partner:", err.message);
             return reject(err);
           }
           resolve();
@@ -34,7 +34,7 @@ async function handleOrphanedDuos(playerId) {
       );
     });
 
-    logger.info(
+    console.info(
       `✅ Duo partner removed for ${playerId} (partner no longer queued)`
     );
   }

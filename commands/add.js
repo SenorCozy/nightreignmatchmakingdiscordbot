@@ -1,7 +1,10 @@
-const { SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
-
+const { SlashCommandBuilder } = require("discord.js");
 const { hasModRole } = require("../utils/permissions");
 const db = require("../database");
+const {
+  incrementMatchesPlayed,
+  trackQueueLeaveTimestamp,
+} = require("../utils/playerstatshelper");
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -31,7 +34,9 @@ module.exports = {
     }
 
     try {
-      // Check if blacklisted
+      const now = Date.now();
+
+      // ✅ Check if blacklisted
       const isBlacklisted = await new Promise((resolve, reject) => {
         db.get(
           `SELECT id FROM blacklist WHERE id = ?`,
@@ -47,69 +52,86 @@ module.exports = {
         });
       }
 
-      // Get match
+      // ✅ Fetch match info
       const match = await new Promise((resolve, reject) => {
         db.get(
-          `SELECT playerIds, voiceChannelId FROM channels WHERE threadId = ?`,
+          `SELECT match_id, voiceChannelId FROM channels WHERE threadId = ?`,
           [thread.id],
           (err, row) => (err ? reject(err) : resolve(row))
         );
       });
 
-      if (!match) {
+      if (!match?.match_id) {
         return interaction.reply({
           content: "❌ This thread is not linked to an active match.",
           flags: 64,
         });
       }
 
-      const playerIds = match.playerIds.split(",").filter(Boolean);
+      const { match_id, voiceChannelId } = match;
 
-      if (playerIds.includes(playerId)) {
+      // ✅ Check if already in match as active
+      const existing = await new Promise((resolve, reject) => {
+        db.get(
+          `SELECT status FROM match_players WHERE match_id = ? AND playerId = ?`,
+          [match_id, playerId],
+          (err, row) => (err ? reject(err) : resolve(row))
+        );
+      });
+
+      if (existing?.status === "active") {
         return interaction.reply({
           content: `⚠️ <@${playerId}> is already part of this match.`,
           flags: 64,
         });
       }
 
-      // Add to DB
-      playerIds.push(playerId);
-      await new Promise((resolve, reject) => {
-        db.run(
-          `UPDATE channels SET playerIds = ? WHERE threadId = ?`,
-          [playerIds.join(","), thread.id],
-          (err) => (err ? reject(err) : resolve())
-        );
-      });
+      // ✅ Upsert into match_players
+      await db.run(
+        `INSERT INTO match_players (match_id, threadId, playerId, status, joined_at)
+         VALUES (?, ?, ?, 'active', ?)
+         ON CONFLICT(match_id, playerId) DO UPDATE SET status = 'active', joined_at = excluded.joined_at`,
+        [match_id, thread.id, playerId, now]
+      );
 
-      // Add to thread
+      // ✅ Insert match_event for auditing
+      await db.run(
+        `INSERT INTO match_events (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
+         VALUES (?, ?, ?, 'join', ?, ?, 'active')`,
+        [match_id, thread.id, playerId, now, "manually added by mod"]
+      );
+
+      // ✅ Update statistics
+      await db.run(`INSERT OR IGNORE INTO player_statistics (id) VALUES (?)`, [
+        playerId,
+      ]);
+      await incrementMatchesPlayed(playerId);
+      await trackQueueLeaveTimestamp(playerId);
+
+      // ✅ Add to thread and permissions
       try {
         await thread.members.add(playerId);
-        await thread.permissionOverwrites.edit(playerId, {
-          ViewChannel: true,
-          SendMessages: true,
-        });
-        logger.info(`✅ Added ${playerId} to thread ${thread.id}`);
       } catch (err) {
-        logger.error(`❌ Failed to add user to thread: ${err.message}`);
+        console.warn(`⚠️ Could not update thread perms:`, err.message);
       }
 
-      // Add to VC
-      if (match.voiceChannelId) {
-        const vc = thread.guild.channels.cache.get(match.voiceChannelId);
+      // ✅ Voice channel perms
+      if (voiceChannelId) {
+        const vc = thread.guild.channels.cache.get(voiceChannelId);
         if (vc) {
           try {
-            await vc.permissionOverwrites.edit(playerId, {
-              ViewChannel: true,
-              Connect: true,
-              Speak: true,
-            });
-            logger.info(`✅ Updated VC permissions for ${playerId}`);
+            await vc.permissionOverwrites
+              .edit(playerId, {
+                ViewChannel: true,
+                Connect: true,
+                Speak: true,
+              })
+              .catch(() => {});
           } catch (err) {
-            logger.error(`❌ Failed to update VC perms: ${err.message}`);
+            console.warn(`⚠️ Could not update VC perms:`, err.message);
           }
         } else {
-          logger.warn(`⚠️ VC ${match.voiceChannelId} not found`);
+          console.warn(`⚠️ VC not found for ID: ${voiceChannelId}`);
         }
       }
 
@@ -118,7 +140,7 @@ module.exports = {
         flags: 64,
       });
     } catch (error) {
-      logger.error("❌ Unexpected error in /add:", error);
+      console.error("❌ Error in /add command:", error);
       return interaction.reply({
         content: "❌ An error occurred while adding the user.",
         flags: 64,

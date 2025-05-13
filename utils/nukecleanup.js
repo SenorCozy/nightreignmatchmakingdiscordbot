@@ -13,7 +13,10 @@ async function deleteBotThreadsAndVoiceChannels(guild) {
       await thread
         .delete("Nuke command executed")
         .catch((err) =>
-          logger.error(`Failed to delete thread (${thread.name}):`, err.message)
+          console.error(
+            `Failed to delete thread (${thread.name}):`,
+            err.message
+          )
         );
     }
 
@@ -28,18 +31,18 @@ async function deleteBotThreadsAndVoiceChannels(guild) {
       await voiceChannel
         .delete("Nuke command executed")
         .catch((err) =>
-          logger.error(
+          console.error(
             `Failed to delete voice channel (${voiceChannel.name}):`,
             err.message
           )
         );
     }
 
-    logger.info(
+    console.info(
       "✅ All matchmaking-related threads and voice channels deleted."
     );
   } catch (error) {
-    logger.error(
+    console.error(
       "❌ Error deleting matchmaking-related threads and voice channels:",
       error.message
     );
@@ -50,30 +53,32 @@ async function deleteBotThreadsAndVoiceChannels(guild) {
 }
 
 async function clearDatabaseTables() {
+  const tablesToClear = [
+    "players",
+    "channels",
+    "match_players",
+    "match_events",
+    "matches",
+    "transcripts",
+    "transcript_messages",
+  ];
+
   try {
-    await new Promise((resolve, reject) => {
-      db.run(`DELETE FROM players`, (err) => {
-        if (err) {
-          logger.error("❌ Error clearing players table:", err.message);
-          return reject(err);
-        }
-        resolve();
+    for (const table of tablesToClear) {
+      await new Promise((resolve, reject) => {
+        db.run(`DELETE FROM ${table}`, (err) => {
+          if (err) {
+            console.error(`❌ Error clearing ${table} table:`, err.message);
+            return reject(err);
+          }
+          resolve();
+        });
       });
-    });
+    }
 
-    await new Promise((resolve, reject) => {
-      db.run(`DELETE FROM channels`, (err) => {
-        if (err) {
-          logger.error("❌ Error clearing channels table:", err.message);
-          return reject(err);
-        }
-        resolve();
-      });
-    });
-
-    logger.info("✅ Queue and match data successfully cleared.");
+    console.info("✅ All matchmaking-related data successfully cleared.");
   } catch (error) {
-    logger.error("❌ Error clearing database tables:", error.message);
+    console.error("❌ Error clearing database tables:", error.message);
     throw new Error("Failed to clear database tables.");
   }
 }

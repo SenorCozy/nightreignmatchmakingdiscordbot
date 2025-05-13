@@ -81,6 +81,15 @@ module.exports = {
       });
 
       if (isBlacklisted) {
+        // ✅ Update username before removal (just in case it was outdated)
+        await new Promise((resolve, reject) => {
+          db.run(
+            `UPDATE blacklist SET username = ? WHERE id = ?`,
+            [user.username, user.id],
+            (err) => (err ? reject(err) : resolve())
+          );
+        });
+
         await new Promise((resolve, reject) => {
           db.run(`DELETE FROM blacklist WHERE id = ?`, [user.id], (err) =>
             err ? reject(err) : resolve()

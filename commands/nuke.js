@@ -64,12 +64,9 @@ module.exports = {
         await deleteBotThreadsAndVoiceChannels(interaction.guild);
         await clearDatabaseTables();
 
-        await interaction.channel.send(
-          "✅ **Queue and match data cleared. Statistics remain intact.**"
-        );
-        logger.info("✅ /nuke completed successfully.");
+        console.info("✅ /nuke completed successfully.");
       } catch (err) {
-        logger.error("❌ Error during /nuke:", err);
+        console.error("❌ Error during /nuke:", err);
         await interaction.channel.send(
           "❌ An error occurred during the nuke process. Please check logs."
         );

@@ -50,7 +50,7 @@ module.exports = {
           [],
           (err, row) => {
             if (err) {
-              logger.error("Error fetching failed ready checks:", err.message);
+              console.error("Error fetching failed ready checks:", err.message);
               return reject(err);
             }
             resolve(row?.total || 0);
@@ -58,13 +58,14 @@ module.exports = {
         );
       });
 
-      const avgMatchLength = statMap.total_match_time
-        ? (
-            statMap.total_match_time /
-            statMap.total_matches_created /
-            1000
-          ).toFixed(2)
-        : "N/A";
+      const avgMatchLength =
+        statMap.total_match_time && statMap.total_matches_created
+          ? (
+              statMap.total_match_time /
+              statMap.total_matches_created /
+              1000
+            ).toFixed(2)
+          : "N/A";
 
       const platformStats = `
 - **Matches Per Platform:**
@@ -106,9 +107,12 @@ module.exports = {
 - **Total Matches Created:** ${statMap.total_matches_created || 0}
 - **Failed Ready Checks:** ${failedReadyChecks}
 - **Average Match Length:** ${avgMatchLength} seconds
-- **Longest Match Length:** ${(statMap.longest_match_time / 1000 || 0).toFixed(
-        2
-      )} seconds
+- **Longest Match Length:** ${
+        statMap.longest_match_time
+          ? (statMap.longest_match_time / 1000).toFixed(2)
+          : "N/A"
+      } seconds
+
 
 ${platformStats}
 ${queueTimeStats}
@@ -122,7 +126,7 @@ ${topPlayerStats}
         flags: 64,
       });
     } catch (error) {
-      logger.error("❌ Error in /botstats:", error);
+      console.error("❌ Error in /botstats:", error);
       return interaction.reply({
         content: "❌ An error occurred while fetching bot statistics.",
         flags: 64,

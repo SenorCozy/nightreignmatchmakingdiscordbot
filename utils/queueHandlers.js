@@ -6,7 +6,7 @@ const {
   TextInputBuilder,
   TextInputStyle,
 } = require("discord.js");
-
+const db = require("../database");
 const { playerPlatformSelection } = require("../utils/globalState");
 
 const {
@@ -96,9 +96,8 @@ async function handleSoloQueue(interaction) {
     await incrementBotStatistic("total_queue_entries");
     await incrementBotStatistic(`queue_entries_${platform}`);
     await trackUniqueUser(playerId);
-    await runMatchmaking();
   } catch (error) {
-    logger.error("Error in handleSoloQueue:", error.message);
+    console.error("Error in handleSoloQueue:", error.message);
     if (!interaction.replied) {
       await interaction.reply({
         content: "❌ An error occurred while joining the queue.",
@@ -147,20 +146,21 @@ async function handleDuoQueue(interaction) {
 
     const modal = new ModalBuilder()
       .setCustomId("duo_partner_modal")
-      .setTitle("Enter Your Duo Partner's Username")
+      .setTitle("Enter Your Duo Partner's Discord Username")
       .addComponents(
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
             .setCustomId("duo_partner_username")
-            .setLabel("Partner's Discord Username")
+            .setLabel("Partner's Unique discord name.")
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
+            .setPlaceholder("Provide duo partner's UNIQUE discord username")
         )
       );
 
     await interaction.showModal(modal);
   } catch (error) {
-    logger.error("Error in handleDuoQueue:", error.message);
+    console.error("Error in handleDuoQueue:", error.message);
     await interaction.reply({
       content: "❌ An error occurred while preparing your duo queue.",
       flags: 64,
@@ -172,9 +172,16 @@ async function handleDuoQueueModal(interaction) {
   try {
     const playerId = interaction.user.id;
     const platform = playerPlatformSelection[playerId];
-    const friendUsername = interaction.fields.getTextInputValue(
+    let friendUsername = interaction.fields.getTextInputValue(
       "duo_partner_username"
     );
+    friendUsername = friendUsername.trim().toLowerCase();
+    if (friendUsername.length < 2) {
+      return interaction.reply({
+        content: "❌ Please enter at least 2 characters.",
+        flags: 64,
+      });
+    }
 
     if (!platform) {
       return interaction.reply({
@@ -185,20 +192,45 @@ async function handleDuoQueueModal(interaction) {
 
     await enforceQueueCooldown(playerId);
 
-    const friend = await interaction.guild.members
-      .fetch({ query: friendUsername, limit: 1 })
-      .then((members) =>
-        members.find((m) => m.user.username === friendUsername)
-      );
+    let friend = interaction.guild.members.cache.find(
+      (m) => m.user.username.toLowerCase() === friendUsername
+    );
 
+    // Fallback: force fetch all members if not found in cache
+    if (!friend) {
+      try {
+        await interaction.guild.members.fetch(); // repopulates cache
+        friend = interaction.guild.members.cache.find(
+          (m) => m.user.username.toLowerCase() === friendUsername
+        );
+      } catch (err) {
+        console.warn(`⚠️ Failed to fetch members for fallback lookup:`, err);
+      }
+    }
     if (!friend) {
       return interaction.reply({
-        content:
-          "❌ Friend not found. Make sure their username is correct and they are in this server.",
+        content: `❌ Could not find a user named **${friendUsername}** in this server.`,
         flags: 64,
       });
     }
+    if (friend.user.bot) {
+      return interaction.reply({
+        content: "🤖 You cannot queue with a bot as your partner.",
+        flags: 64,
+      });
+    }
+    const isBlacklisted = await new Promise((resolve, reject) => {
+      db.get(`SELECT id FROM blacklist WHERE id = ?`, [friend.id], (err, row) =>
+        err ? reject(err) : resolve(!!row)
+      );
+    });
 
+    if (isBlacklisted) {
+      return interaction.reply({
+        content: `🚫 <@${friend.id}> is blacklisted and cannot join the queue.`,
+        flags: 64,
+      });
+    }
     const friendId = friend.id;
     const initiator = await getPlayerById(playerId);
     const partner = await getPlayerById(friendId);
@@ -222,23 +254,26 @@ async function handleDuoQueueModal(interaction) {
       });
     }
 
-    await new Promise((resolve, reject) => {
-      db.run(
-        `INSERT OR REPLACE INTO players (id, platform, status, duoPartner, queue_entered_at) VALUES 
-         (?, ?, 'queued', ?, ?), (?, ?, 'queued', ?, ?)`,
-        [
-          playerId,
-          platform,
-          friendId,
-          Date.now(),
-          friendId,
-          platform,
-          playerId,
-          Date.now(),
-        ],
-        (err) => (err ? reject(err) : resolve())
-      );
-    });
+    await Promise.all([
+      new Promise((resolve, reject) => {
+        db.run(
+          `INSERT OR REPLACE INTO players 
+           (id, platform, status, duoPartner, queue_entered_at)
+           VALUES (?, ?, 'queued', ?, ?)`,
+          [playerId, platform, friendId, Date.now()],
+          (err) => (err ? reject(err) : resolve())
+        );
+      }),
+      new Promise((resolve, reject) => {
+        db.run(
+          `INSERT OR REPLACE INTO players 
+           (id, platform, status, duoPartner, queue_entered_at)
+           VALUES (?, ?, 'queued', ?, ?)`,
+          [friendId, platform, playerId, Date.now()],
+          (err) => (err ? reject(err) : resolve())
+        );
+      }),
+    ]);
 
     await updateQueueStatistics(playerId, platform, false);
     await updateQueueStatistics(friendId, platform, false);
@@ -247,6 +282,9 @@ async function handleDuoQueueModal(interaction) {
 
     const queuePosition = await getQueuePosition(playerId, platform);
     const avgWaitTime = await calculateAverageQueueTime(platform, "duo");
+    console.log(
+      `✅ Duo queue success: ${interaction.user.tag} + ${friend.user.tag} on ${platform}`
+    );
 
     return interaction.reply({
       content: `✅ You and <@${friendId}> have joined the **Duo** queue for **${platform.toUpperCase()}**.\n**Queue Position:** ${queuePosition}\n**Estimated Wait Time:** ${Math.round(
@@ -263,7 +301,7 @@ async function handleDuoQueueModal(interaction) {
       flags: 64,
     });
   } catch (error) {
-    logger.error("Error in handleDuoQueueModal:", error.message);
+    console.error("Error in handleDuoQueueModal:", error.message);
     return interaction.reply({
       content: "❌ An error occurred while processing your duo queue request.",
       flags: 64,

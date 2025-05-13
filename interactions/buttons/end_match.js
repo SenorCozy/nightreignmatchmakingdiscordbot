@@ -1,8 +1,8 @@
 const { PermissionFlagsBits, ComponentType } = require("discord.js");
 const db = require("../../database");
 
-const { cleanupMatch } = require("../utils/matchmakingUtils/matchUtils");
-const { hasModRole } = require("../utils/permissions");
+const { cleanupMatch } = require("../../utils/matchmakingUtils/matchUtils");
+const { hasModRole } = require("../../utils/permissions");
 
 module.exports = {
   customId: "end_match",
@@ -28,16 +28,32 @@ module.exports = {
         });
       }
 
-      const { playerIds, voiceChannelId } = dbResult;
-      const playerList = playerIds.split(",");
+      const { voiceChannelId } = dbResult;
+
+      const playerList = await new Promise((resolve, reject) => {
+        db.all(
+          `SELECT playerId FROM match_players WHERE threadId = ? AND status = 'active'`,
+          [thread.id],
+          (err, rows) =>
+            err ? reject(err) : resolve(rows.map((r) => r.playerId))
+        );
+      });
 
       // ✅ Instant End if Moderator
       if (hasModRole(interaction.member)) {
-        await cleanupMatch({ thread, voiceChannelId });
-        return interaction.reply({
-          content: "✅ Match was ended by a moderator.",
-          flags: 64,
+        const stillExists = await thread.guild.channels
+          .fetch(thread.id)
+          .catch(() => null);
+        if (!stillExists) return;
+
+        await cleanupMatch({
+          thread,
+          voiceChannelId,
+          closedByUserOrBot: interaction.user,
+          closureReason: "Ended by moderator via vote bypass",
         });
+
+        return;
       }
 
       // ✅ Player Voting
@@ -66,7 +82,13 @@ module.exports = {
 
         if (collectedUsers.size >= 2) {
           collector.stop();
-          await cleanupMatch({ thread, voiceChannelId });
+
+          await cleanupMatch({
+            thread,
+            voiceChannelId,
+            closedByUserOrBot: btnInt.user,
+            closureReason: "Match ended by player vote",
+          });
         } else {
           return btnInt
             .reply({
@@ -77,7 +99,7 @@ module.exports = {
         }
       });
 
-      collector.on("end", async (collected) => {
+      collector.on("end", async () => {
         if (collectedUsers.size < 2) {
           await thread
             .send("❌ Match vote expired without enough confirmations.")
@@ -85,7 +107,7 @@ module.exports = {
         }
       });
     } catch (err) {
-      logger.error("❌ Error handling end_match:", err.message);
+      console.error("❌ Error handling end_match:", err.message);
       return interaction
         .reply({
           content: "❌ Something went wrong while ending the match.",

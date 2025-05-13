@@ -1,27 +1,30 @@
-// utils/player.js
-const db = require("../database");
 function deletePlayer(playerId) {
-  return new Promise((resolve, reject) => {
-    db.run(`DELETE FROM players WHERE id = ?`, [playerId], (err) => {
-      if (err) {
-        logger.error("Error deleting player from database:", err.message);
-        return reject(err);
-      }
-      logger.info(`✅ Player ${playerId} has been removed from the database.`);
+  return new Promise(async (resolve, reject) => {
+    try {
+      // Step 1: Remove from `players`
+      await new Promise((res, rej) => {
+        db.run(`DELETE FROM players WHERE id = ?`, [playerId], (err) =>
+          err ? rej(err) : res()
+        );
+      });
+
+      // Step 2: Mark `match_players` as removed
+      await new Promise((res, rej) => {
+        db.run(
+          `UPDATE match_players SET status = 'removed' WHERE playerId = ?`,
+          [playerId],
+          (err) => (err ? rej(err) : res())
+        );
+      });
+
+      console.info(`✅ Player ${playerId} fully reset from the database.`);
       resolve();
-    });
+    } catch (err) {
+      console.error(
+        `❌ Error during player reset for ${playerId}:`,
+        err.message
+      );
+      reject(err);
+    }
   });
 }
-
-function getPlayerById(playerId) {
-  return new Promise((resolve, reject) => {
-    db.get(`SELECT * FROM players WHERE id = ?`, [playerId], (err, row) =>
-      err ? reject(err) : resolve(row)
-    );
-  });
-}
-
-module.exports = {
-  deletePlayer,
-  getPlayerById,
-};

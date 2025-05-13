@@ -1,4 +1,4 @@
-const { searchForPlayers } = require("../commands/search");
+const { searchForPlayers } = require("../../commands/search");
 const db = require("../../database");
 
 module.exports = {
@@ -29,7 +29,15 @@ module.exports = {
         });
       }
 
-      const playerIds = match.playerIds.split(",").filter(Boolean);
+      const playerIds = await new Promise((resolve, reject) => {
+        db.all(
+          `SELECT playerId FROM match_players WHERE threadId = ? AND status = 'active'`,
+          [thread.id],
+          (err, rows) =>
+            err ? reject(err) : resolve(rows.map((r) => r.playerId))
+        );
+      });
+
       const missingCount = 3 - playerIds.length;
 
       if (missingCount <= 0) {
@@ -46,7 +54,10 @@ module.exports = {
 
       await searchForPlayers(thread, missingCount);
     } catch (error) {
-      logger.error("❌ Error handling find_replacement button:", error.message);
+      console.error(
+        "❌ Error handling find_replacement button:",
+        error.message
+      );
       await interaction
         .reply({
           content: "❌ An error occurred while finding replacements.",

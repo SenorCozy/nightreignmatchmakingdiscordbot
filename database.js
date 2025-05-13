@@ -38,18 +38,25 @@ const db = new sqlite3.Database(dbPath, (err) => {
         id TEXT PRIMARY KEY,
         threadId TEXT NOT NULL,
         voiceChannelId TEXT DEFAULT NULL,
+        match_id TEXT NOT NULL,
         playerIds TEXT NOT NULL,
         lastActivity INTEGER NOT NULL,
         lastReadyCheck INTEGER DEFAULT 0
       )
     `);
-
-    // Ensure matchmaking settings exist
+    // ✅ Match Events Table (for join/leave/kick history)
     db.run(`
-   INSERT INTO settings (key, value) VALUES 
-  ('matchmaking_paused', '0'),
-  ('matchmaking_interval', '10000')
-  ON CONFLICT(key) DO NOTHING;
+  CREATE TABLE IF NOT EXISTS match_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id TEXT NOT NULL,
+    threadId TEXT NOT NULL,
+    playerId TEXT NOT NULL,
+    eventType TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    reason TEXT DEFAULT NULL,
+    final_status TEXT DEFAULT NULL
+
+  )
 `);
 
     // ✅ Player Statistics Table
@@ -69,7 +76,8 @@ const db = new sqlite3.Database(dbPath, (err) => {
         status TEXT DEFAULT 'completed',  -- Ensures tracking of queue completion
         platform TEXT DEFAULT 'unknown',  -- Fixes missing platform column
         failed_ready_checks INTEGER DEFAULT 0,
-        longest_match_time INTEGER DEFAULT 0
+        longest_match_time INTEGER DEFAULT 0,
+        total_match_time INTEGER DEFAULT 0
       )
     `);
 
@@ -101,16 +109,82 @@ const db = new sqlite3.Database(dbPath, (err) => {
       )
     `);
 
-    // ✅ Settings Table (Queue Lock Feature)
+    // ✅ Normalized Match Players Table (enhanced with status)
     db.run(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )
-    `);
+  CREATE TABLE IF NOT EXISTS match_players (
+  match_id TEXT NOT NULL,
+    threadId TEXT NOT NULL,
+    playerId TEXT NOT NULL,
+    status TEXT DEFAULT 'active',    
+    leave_in_progress INTEGER DEFAULT 0,
+    joined_at INTEGER DEFAULT NULL,
+    PRIMARY KEY (match_id, playerId)  
+  )
+`);
+    db.run(`CREATE TABLE IF NOT EXISTS matches (
+  match_id TEXT PRIMARY KEY,             -- persistent UUID
+  thread_id TEXT NOT NULL,
+  platform TEXT,
+  created_by TEXT,
+  created_at TIMESTAMP NOT NULL,
+  closed_at TIMESTAMP DEFAULT NULL,
+  closed_by TEXT DEFAULT NULL,
+  closure_reason TEXT DEFAULT NULL
+)`);
+    // ✅ Transcripts Table for Match Threads
+    db.run(`
+CREATE TABLE IF NOT EXISTS transcripts (
+  id TEXT PRIMARY KEY,
+  match_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  user_id TEXT,
+  username TEXT,
+  closed_by TEXT,
+  closed_by_username TEXT,
+  closure_reason TEXT DEFAULT NULL,
+  created_at TIMESTAMP NOT NULL,
+  closed_at TIMESTAMP NOT NULL,
+  player_ids TEXT NOT NULL  
+)
+`);
+
+    // ✅ Transcript Messages Table
+    db.run(`
+  CREATE TABLE IF NOT EXISTS transcript_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transcript_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    avatar_url TEXT NOT NULL,
+    message TEXT NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    attachment_url TEXT DEFAULT NULL,
+    embed_data TEXT DEFAULT NULL,
+    reactions TEXT DEFAULT NULL,
+    FOREIGN KEY (transcript_id) REFERENCES transcripts(id)
+  )
+`);
 
     console.log("✅ Database schema verified and initialized.");
   }
+});
+
+// ✅ Settings Table (Queue Lock Feature)
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `);
+
+  // ✅ Insert default matchmaking settings (only if not already set)
+  db.run(`
+    INSERT INTO settings (key, value) VALUES 
+      ('matchmaking_paused', '0'),
+      ('matchmaking_interval', '10000')
+    ON CONFLICT(key) DO NOTHING
+  `);
 });
 
 // Schedule daily database backups at midnight

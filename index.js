@@ -1,5 +1,8 @@
 require("dotenv").config();
-const logger = require("./logger");
+const db = require("./database.js");
+const fs = require("fs");
+const path = require("path");
+const logger = console;
 const {
   joinVoiceChannel,
   createAudioPlayer,
@@ -7,24 +10,30 @@ const {
   VoiceConnectionStatus,
   AudioPlayerStatus,
 } = require("@discordjs/voice");
+const { checkThreadIntegrity } = require("./utils/threadIntegrityChecker");
 const {
   loadMatchmakingSettings,
-} = require("./utils/matchmaking/loadMatchmakingSettings");
-const { startMatchmakingLoop } = require("./utils/matchmaking/matchmakingLoop");
+} = require("./utils/matchmakingUtils/loadMatchmakingSettings");
+const {
+  startMatchmakingLoop,
+} = require("./utils/matchmakingUtils/matchmakingLoop");
 const googleTTS = require("google-tts-api"); // TTS API to generate speech
 const { createAudioStream } = require("prism-media"); // Convert to audio stream
 const handleInteraction = require("./interactions/interactionCreate");
-const { cleanupMatches } = require("./utils/matchamkingUtils/cleanupMatches");
+const { cleanupMatches } = require("./utils/matchmakingUtils/matchUtils");
+const eventsPath = path.join(__dirname, "interactions", "events");
+const threadMemberUpdateHandler = require("./interactions/events/threadMemberUpdate");
 
-client.on("interactionCreate", async (interaction) => {
-  try {
-    await handleInteraction(interaction);
-  } catch (err) {
-    logger.error("Error in interactionCreate:", err.message);
-  }
+const eventFiles = fs
+  .readdirSync(eventsPath)
+  .filter((file) => file.endsWith(".js"));
+
+console.log("✅ DB from index.js:", typeof db !== "undefined");
+
+db.get("SELECT name FROM sqlite_master WHERE type='table'", (err, row) => {
+  if (err) console.error("Database error:", err);
+  else console.log("Database tables:", row);
 });
-
-const db = require("./database.js");
 const {
   Client,
   Intents,
@@ -54,7 +63,94 @@ const client = new Client({
   ],
 });
 
+// load events
+for (const file of eventFiles) {
+  const filePath = path.join(eventsPath, file);
+  const event = require(filePath);
+  if (event.once) {
+    client.once(event.name, (...args) => event.execute(...args));
+  } else {
+    client.on(event.name, (...args) => event.execute(...args));
+  }
+  console.log(`✅ Loaded event: ${event.name}`);
+}
+
+// Load commands into client.commands
+client.commands = new Map();
+const commandsPath = path.join(__dirname, "commands");
+const commandFiles = fs
+  .readdirSync(commandsPath)
+  .filter((file) => file.endsWith(".js"));
+
+const commandDataArray = [];
+const loadedCommandNames = new Set();
+
+for (const file of commandFiles) {
+  const filePath = path.join(commandsPath, file);
+  const command = require(filePath);
+
+  if (
+    command?.data &&
+    typeof command.execute === "function" &&
+    !loadedCommandNames.has(command.data.name)
+  ) {
+    client.commands.set(command.data.name, command);
+    commandDataArray.push(command.data);
+    loadedCommandNames.add(command.data.name);
+    console.log(`✅ Loaded command: ${command.data.name}`);
+  } else if (loadedCommandNames.has(command.data?.name)) {
+    console.warn(`⚠️ Duplicate command skipped: ${command.data.name}`);
+  } else {
+    console.warn(`⚠️ Skipped invalid command: ${file}`);
+  }
+}
+
+client.once("ready", async () => {
+  console.log("🎯 Client ready event fired");
+  console.log("🔍 Client status:", {
+    isReady: client.isReady(),
+    guilds: client.guilds.cache.size,
+  });
+
+  try {
+    const { matchmakingInterval } = await loadMatchmakingSettings();
+    client.matchmakingInterval = matchmakingInterval;
+
+    console.log(
+      "⏳ Starting matchmaking loop with interval:",
+      matchmakingInterval
+    );
+    startMatchmakingLoop(client, db, matchmakingInterval);
+  } catch (err) {
+    console.error("❌ Failed to start matchmaking loop:", err);
+  }
+});
+client.on("ready", async () => {
+  console.log(`✅ Logged in as: ${client.user.tag}`);
+
+  try {
+    // Register all loaded commands
+    const guild = client.guilds.cache.first(); // or use specific ID if needed
+    await guild.commands.set(commandDataArray);
+
+    console.log(
+      `✅ Registered ${commandDataArray.length} application commands.`
+    );
+  } catch (error) {
+    console.error("❌ Error registering commands:", error);
+  }
+});
+client.on("interactionCreate", async (interaction) => {
+  try {
+    await handleInteraction(interaction);
+  } catch (err) {
+    logger.error("Error in interactionCreate:", err.message);
+  }
+});
 let playerPlatformSelection = {}; // Track platform selections per player
+
+//scans for players who manually leave threads or are manually removed by mods
+client.on("threadMembersUpdate", threadMemberUpdateHandler);
 
 //TTS test function
 async function announceVCWarning(voiceChannel, message) {
@@ -123,7 +219,10 @@ async function getPlayerStatus(playerId) {
 }
 
 // clean up inactive matches function scans for matches to clean up then executes cleanupmatch
-setInterval(cleanupMatches, 1 * 1500 * 1000); // Run every 5 minutes CHANGE BACK!!
+setInterval(() => cleanupMatches(client), 10000);
+// Run every 5 minutes CHANGE BACK!!
+
+setInterval(() => checkThreadIntegrity(client), 10000); // 3 minutes CHANGE BACK
 
 async function isPlayerInServer(playerId) {
   const guild = client.guilds.cache.first();
@@ -297,54 +396,66 @@ client.on("voiceStateUpdate", async (oldState, newState) => {
 
 client.on("guildMemberRemove", async (member) => {
   const userId = member.id;
+  const timestamp = Date.now();
 
-  // Attempt to remove the user from the queue
   try {
-    const result = await new Promise((resolve, reject) => {
+    // Remove from queue if present
+    await new Promise((resolve, reject) => {
       db.run(`DELETE FROM players WHERE id = ?`, [userId], function (err) {
         if (err) return reject(err);
-        resolve(this.changes); // Number of rows affected
+        if (this.changes > 0) {
+          console.info(`🛑 Player ${userId} removed from the queue.`);
+        } else {
+          console.info(`ℹ️ Player ${userId} was not in the queue.`);
+        }
+        resolve();
       });
     });
 
-    if (result > 0) {
-      logger.info(`🛑 Player ${userId} removed from the queue.`);
-    } else {
-      logger.info(`ℹ️ Player ${userId} was not in the queue.`);
-    }
-  } catch (err) {
-    logger.error(`❌ Error removing player ${userId} from queue:`, err.message);
-  }
-
-  // Check if the user was part of an active match
-  let matchThreadId;
-  try {
-    matchThreadId = await new Promise((resolve, reject) => {
+    // Check if the user was part of an active match
+    const matchData = await new Promise((resolve, reject) => {
       db.get(
-        `SELECT threadId FROM channels WHERE playerIds LIKE ?`,
+        `SELECT match_id, threadId, voiceChannelId FROM channels WHERE playerIds LIKE ?`,
         [`%${userId}%`],
         (err, row) => {
           if (err) return reject(err);
-          resolve(row ? row.threadId : null);
+          resolve(row || null);
         }
       );
     });
-  } catch (err) {
-    logger.error(`❌ Error checking match status for ${userId}:`, err.message);
-    return;
-  }
 
-  if (!matchThreadId) {
-    logger.info(`ℹ️ Player ${userId} was not in an active match.`);
-    return;
-  }
+    if (!matchData) {
+      console.info(`ℹ️ Player ${userId} was not in an active match.`);
+      return;
+    }
 
-  // Remove the user from the match's playerIds
-  try {
+    const { match_id, threadId, voiceChannelId } = matchData;
+
+    // Update match_players status
+    await db.run(
+      `UPDATE match_players SET status = 'removed' WHERE match_id = ? AND playerId = ?`,
+      [match_id, userId]
+    );
+
+    // Insert into match_events with final_status
+    await db.run(
+      `INSERT INTO match_events (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
+       VALUES (?, ?, ?, 'leave', ?, ?, ?)`,
+      [
+        match_id,
+        threadId,
+        userId,
+        timestamp,
+        "Player left the server",
+        "left_server",
+      ]
+    );
+
+    // Update playerIds in channels
     const { playerIds } = await new Promise((resolve, reject) => {
       db.get(
         `SELECT playerIds FROM channels WHERE threadId = ?`,
-        [matchThreadId],
+        [threadId],
         (err, row) => {
           if (err) return reject(err);
           resolve(row || {});
@@ -358,38 +469,47 @@ client.on("guildMemberRemove", async (member) => {
         .filter((id) => id !== userId)
         .join(",");
 
-      await new Promise((resolve, reject) => {
-        db.run(
-          `UPDATE channels SET playerIds = ? WHERE threadId = ?`,
-          [updatedPlayerIds, matchThreadId],
-          (err) => (err ? reject(err) : resolve())
+      await db.run(`UPDATE channels SET playerIds = ? WHERE threadId = ?`, [
+        updatedPlayerIds,
+        threadId,
+      ]);
+    }
+
+    // Notify the match thread
+    const thread = client.channels.cache.get(threadId);
+    if (thread) {
+      await thread.send({
+        content: `⚠️ **<@${userId}> has left the server.**`,
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId("end_match")
+              .setLabel("End Match")
+              .setStyle(ButtonStyle.Danger),
+            new ButtonBuilder()
+              .setCustomId("find_replacement")
+              .setLabel("Find Replacement")
+              .setStyle(ButtonStyle.Primary)
+          ),
+        ],
+      });
+
+      // Check if match is now empty
+      const remaining = await new Promise((resolve, reject) => {
+        db.all(
+          `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
+          [match_id],
+          (err, rows) =>
+            err ? reject(err) : resolve(rows.map((r) => r.playerId))
         );
       });
 
-      logger.info(`🧹 Removed player ${userId} from match ${matchThreadId}.`);
+      if (remaining.length === 0) {
+        await cleanupMatch({ thread, voiceChannelId });
+      }
     }
   } catch (err) {
-    logger.error(`❌ Error updating match data for ${userId}:`, err.message);
-  }
-
-  // Notify the match thread
-  const thread = client.channels.cache.get(matchThreadId);
-  if (thread) {
-    await thread.send({
-      content: `⚠️ **<@${userId}> has left the server.**`,
-      components: [
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("end_match")
-            .setLabel("End Match")
-            .setStyle(ButtonStyle.Danger),
-          new ButtonBuilder()
-            .setCustomId("find_replacement")
-            .setLabel("Find Replacement")
-            .setStyle(ButtonStyle.Primary)
-        ),
-      ],
-    });
+    console.error(`❌ Error handling guildMemberRemove for ${userId}:`, err);
   }
 });
 
@@ -403,11 +523,4 @@ client.on("ready", async () => {
 // reports # of servers bot is active in
 client.guilds.cache.forEach(async (guild) => {
   console.log(`Checking guild: ${guild.name}`);
-});
-
-client.once("ready", async () => {
-  logger.info(`✅ Logged in as ${client.user.tag}`);
-
-  const { matchmakingInterval } = await loadMatchmakingSettings();
-  startMatchmakingLoop(matchmakingInterval);
 });

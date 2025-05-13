@@ -2,7 +2,7 @@ const {
   getQueuePosition,
   calculateAverageQueueTime,
   getPlayerById,
-} = require("../utils/playerUtils");
+} = require("../../utils/playerUtils");
 const db = require("../../database");
 
 module.exports = {
@@ -43,7 +43,7 @@ module.exports = {
             );
           });
 
-          logger.info(`Removed orphaned duo for ${user.id}`);
+          console.info(`Removed orphaned duo for ${user.id}`);
         } else {
           queueType = `Duo (with <@${player.duoPartner}>)`;
           details += `🔹 **Duo Partner:** <@${player.duoPartner}>\n`;
@@ -57,8 +57,8 @@ module.exports = {
       );
 
       const estWait =
-        avgWait > 0
-          ? `${Math.round((avgWait * position) / 60)} minutes`
+        avgWait > 0 && position > 0
+          ? `${Math.round((avgWait * position) / 60000)} minutes`
           : "N/A";
 
       details += `🔹 **Queue Type:** ${queueType}\n`;
@@ -77,7 +77,7 @@ module.exports = {
         flags: 64,
       });
     } catch (error) {
-      logger.error("❌ Error in check_queue_status button:", error.message);
+      console.error("❌ Error in check_queue_status button:", error.message);
       return interaction
         .reply({
           content: "An error occurred while checking your status.",

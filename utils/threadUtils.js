@@ -1,9 +1,23 @@
 const { ChannelType } = require("discord.js");
-
+const db = require("../database");
+function updateLastActivity(threadId) {
+  db.run(
+    `UPDATE channels SET lastActivity = ? WHERE threadId = ?`,
+    [Date.now(), threadId],
+    (err) => {
+      if (err) {
+        console.warn(
+          `⚠️ Failed to update lastActivity for ${threadId}:`,
+          err.message
+        );
+      }
+    }
+  );
+}
 async function safeAddToThread(thread, playerId) {
   try {
     if (!thread || !thread.members) {
-      logger.warn(
+      console.warn(
         `safeAddToThread: Invalid thread or missing members (${thread?.id})`
       );
       return;
@@ -11,7 +25,7 @@ async function safeAddToThread(thread, playerId) {
 
     const guildMember = thread.guild.members.cache.get(playerId);
     if (!guildMember) {
-      logger.warn(`safeAddToThread: Player ${playerId} not found in guild.`);
+      console.warn(`safeAddToThread: Player ${playerId} not found in guild.`);
       return;
     }
 
@@ -20,7 +34,7 @@ async function safeAddToThread(thread, playerId) {
       ?.has("ManageThreads");
 
     if (!botHasPermission) {
-      logger.warn(
+      console.warn(
         `safeAddToThread: Bot lacks ManageThreads permission in thread ${thread.id}`
       );
       return;
@@ -28,13 +42,15 @@ async function safeAddToThread(thread, playerId) {
 
     await thread.members
       .add(playerId)
-      .then(() => logger.info(`✅ Added ${playerId} to thread ${thread.id}`))
+      .then(() => console.info(`✅ Added ${playerId} to thread ${thread.id}`))
+
       .catch((error) =>
-        logger.error(
+        console.error(
           `safeAddToThread: Failed to add ${playerId} to thread ${thread.id}:`,
           error.message
         )
       );
+    updateLastActivity(thread.id);
 
     if (
       thread.type === ChannelType.GuildPrivateThread &&
@@ -43,13 +59,14 @@ async function safeAddToThread(thread, playerId) {
       await thread.permissionOverwrites.edit(playerId, {
         ViewChannel: true,
         SendMessages: true,
+        ManageThreads: False,
       });
-      logger.info(
+      console.info(
         `✅ Granted ${playerId} access to private thread ${thread.id}`
       );
     }
   } catch (error) {
-    logger.error(
+    console.error(
       `safeAddToThread: Unexpected error for ${playerId} in thread ${thread?.id}:`,
       error.message
     );
@@ -69,12 +86,12 @@ async function getOrCreateCategory(guild, platform) {
         name: `Nightreign-${platform}`,
         type: ChannelType.GuildCategory,
       });
-      logger.info(`Created category: Nightreign-${platform}`);
+      console.info(`Created category: Nightreign-${platform}`);
     }
 
     return category;
   } catch (error) {
-    logger.error("Error fetching or creating category:", error.message);
+    console.error("Error fetching or creating category:", error.message);
     throw new Error("Failed to get or create category.");
   }
 }
@@ -97,7 +114,7 @@ async function getOrCreatePlatformChannel(guild, platform) {
       topic: `Platform-specific matchmaking channel for ${platform}`,
       parent: category.id,
     });
-    logger.info(`Created platform channel: ${channelName}`);
+    console.info(`Created platform channel: ${channelName}`);
   }
 
   return channel;

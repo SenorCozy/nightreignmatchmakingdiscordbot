@@ -1,4 +1,4 @@
-const { handleDuoQueue } = require("../utils/queueHandlers");
+const { handleDuoQueue } = require("../../utils/queueHandlers");
 
 module.exports = {
   customId: "duo_yes",

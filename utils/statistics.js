@@ -1,4 +1,5 @@
 // utils/statistics.js
+const db = require("../database");
 async function incrementBotStatistic(statKey, incrementBy = 1) {
   try {
     await new Promise((resolve, reject) => {
@@ -10,16 +11,16 @@ async function incrementBotStatistic(statKey, incrementBy = 1) {
         [statKey, incrementBy, incrementBy],
         (err) => {
           if (err) {
-            logger.error("Error incrementing bot statistic:", err.message);
+            console.error("Error incrementing bot statistic:", err.message);
             return reject(err);
           }
           resolve();
         }
       );
     });
-    logger.info(`📈 Incremented statistic: ${statKey} by ${incrementBy}`);
+    console.info(`📈 Incremented statistic: ${statKey} by ${incrementBy}`);
   } catch (error) {
-    logger.error("❌ Error in incrementBotStatistic:", error.message);
+    console.error("❌ Error in incrementBotStatistic:", error.message);
   }
 }
 
@@ -51,7 +52,7 @@ async function updateQueueStatistics(playerId, platform, isSolo) {
       ],
       (err) => {
         if (err) {
-          logger.error("❌ Error updating queue statistics:", err.message);
+          console.error("❌ Error updating queue statistics:", err.message);
           return reject(err);
         }
         resolve();
@@ -59,7 +60,7 @@ async function updateQueueStatistics(playerId, platform, isSolo) {
     );
   });
 
-  logger.info(`📊 Updated queue statistics for ${playerId}`);
+  console.info(`📊 Updated queue statistics for ${playerId}`);
 }
 
 async function trackUniqueUser(userId) {
@@ -70,7 +71,7 @@ async function trackUniqueUser(userId) {
         [userId],
         (err, row) => {
           if (err) {
-            logger.error("Error checking if user is unique:", err.message);
+            console.error("Error checking if user is unique:", err.message);
             return reject(err);
           }
           resolve(!!row); // true if exists
@@ -88,7 +89,7 @@ async function trackUniqueUser(userId) {
           [],
           (err) => {
             if (err) {
-              logger.error(
+              console.error(
                 "Error incrementing unique_users statistic:",
                 err.message
               );
@@ -99,10 +100,10 @@ async function trackUniqueUser(userId) {
         );
       });
 
-      logger.info(`🧍 Tracked new unique user: ${userId}`);
+      console.info(`🧍 Tracked new unique user: ${userId}`);
     }
   } catch (error) {
-    logger.error("Error in trackUniqueUser:", error.message);
+    console.error("Error in trackUniqueUser:", error.message);
   }
 }
 

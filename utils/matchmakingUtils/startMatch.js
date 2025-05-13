@@ -4,49 +4,53 @@ const {
   ButtonStyle,
   ChannelType,
 } = require("discord.js");
+const { v4: uuidv4 } = require("uuid");
 const db = require("../../database");
 const {
   safeAddToThread,
   getOrCreatePlatformChannel,
 } = require("../threadUtils");
+const {
+  incrementMatchesPlayed,
+  trackQueueLeaveTimestamp,
+} = require("../playerstatshelper");
 
-async function startMatch(platform, players, client) {
+async function startMatch(client, platform, players) {
   if (!players || players.length === 0) {
-    logger.warn("⚠️ startMatch was called with an empty match list.");
+    console.warn("⚠️ startMatch was called with an empty match list.");
     return;
   }
 
   try {
+    const allowedRoleIds = [
+      process.env.TICKET_HANDLER_ROLE,
+      process.env.ELDEN_MODERATOR_ROLE,
+      process.env.ELDEN_ENFORCER_ROLE,
+      process.env.BOT_ROLE,
+    ];
+
     const guild = client.guilds.cache.first();
     const platformChannel = await getOrCreatePlatformChannel(guild, platform);
 
-    // ✅ Check for duplicate match
+    // Prevent duplicate match entry
     const existingMatch = await new Promise((resolve, reject) => {
       db.get(
-        `SELECT c.threadId 
-           FROM channels c
-           JOIN players p ON p.id IN (?, ?, ?) 
-           WHERE p.status = 'active' 
-           AND c.playerIds LIKE ? 
-           AND c.threadId IS NOT NULL 
-           LIMIT 1`,
-        [players[0], players[1], players[2], `%${players.join(",")}%`],
-        (err, row) => {
-          if (err) {
-            logger.error("Error checking existing match:", err.message);
-            return reject(err);
-          }
-          resolve(row ? row.threadId : null);
-        }
+        `SELECT threadId FROM match_players 
+         WHERE playerId IN (${players.map(() => "?").join(",")}) 
+         AND status = 'active' LIMIT 1`,
+        players,
+        (err, row) => (err ? reject(err) : resolve(row?.threadId || null))
       );
     });
 
     if (existingMatch) {
-      logger.warn(`⚠️ Duplicate match prevented: ${players.join(", ")}`);
+      console.warn(
+        `⚠️ Duplicate match prevented. One or more players already in thread: ${existingMatch}`
+      );
       return;
     }
 
-    // ✅ Create the private thread
+    // Create thread
     const thread = await platformChannel.threads.create({
       name: `match-${players.join("-")}`,
       autoArchiveDuration: 1440,
@@ -56,40 +60,81 @@ async function startMatch(platform, players, client) {
     });
 
     if (!thread) {
-      logger.error("❌ Failed to create match thread.");
+      console.error("❌ Failed to create match thread.");
       return;
     }
 
-    logger.info(`✅ Created thread: ${thread.name} (${thread.id})`);
+    const matchId = uuidv4();
+    const timestamp = Date.now();
 
-    // ✅ Insert into database
-    const dbInsertSuccess = await new Promise((resolve, reject) => {
+    // Insert into matches table
+    await new Promise((resolve, reject) => {
       db.run(
-        `INSERT OR REPLACE INTO channels (id, threadId, voiceChannelId, playerIds, lastActivity, lastReadyCheck)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        [thread.id, thread.id, null, players.join(","), Date.now(), 0],
-        (err) => {
-          if (err) {
-            logger.error("❌ DB insert failed:", err.message);
-            return reject(err);
-          }
-          logger.info(`✅ Match stored in DB for thread ${thread.id}`);
-          resolve(true);
-        }
+        `INSERT INTO matches (match_id, thread_id, platform, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [matchId, thread.id, platform, players[0], timestamp],
+        (err) => (err ? reject(err) : resolve())
       );
-    }).catch(() => false);
+    });
 
-    if (!dbInsertSuccess) {
-      await thread.delete().catch(() => {});
-      return;
-    }
+    // Insert into channels
+    await new Promise((resolve, reject) => {
+      db.run(
+        `INSERT OR REPLACE INTO channels 
+         (id, threadId, voiceChannelId, match_id, playerIds, lastActivity, lastReadyCheck)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [thread.id, thread.id, null, matchId, players.join(","), timestamp, 0],
+        (err) => (err ? reject(err) : resolve())
+      );
+    });
 
-    // ✅ Add players to thread
+    // Add players to match_players and log join event
     for (const playerId of players) {
-      await safeAddToThread(thread, playerId);
+      await new Promise((resolve, reject) => {
+        db.run(
+          `INSERT INTO match_players (match_id, threadId, playerId, status, joined_at)
+           VALUES (?, ?, ?, 'active', ?)
+           ON CONFLICT(match_id, playerId) DO UPDATE SET status = 'active', joined_at = ?`,
+          [matchId, thread.id, playerId, timestamp, timestamp],
+          (err) => (err ? reject(err) : resolve())
+        );
+      });
+
+      await new Promise((resolve, reject) => {
+        db.run(
+          `INSERT INTO match_events 
+           (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
+           VALUES (?, ?, ?, 'join', ?, ?, 'active')`,
+          [matchId, thread.id, playerId, timestamp, "startMatch"],
+          (err) => (err ? reject(err) : resolve())
+        );
+      });
+
+      await Promise.all([
+        safeAddToThread(thread, playerId).catch(() => {}),
+        incrementMatchesPlayed(playerId).catch(() => {}),
+        trackQueueLeaveTimestamp(playerId).catch(() => {}),
+      ]);
     }
 
-    // ✅ Send buttons
+    // Add helper roles to thread
+    for (const roleId of allowedRoleIds) {
+      const role = thread.guild.roles.cache.get(roleId);
+      if (!role) continue;
+
+      for (const member of role.members.values()) {
+        try {
+          await thread.members.add(member.id);
+        } catch (err) {
+          console.warn(
+            `⚠️ Could not add ${member.user.tag} to thread:`,
+            err.message
+          );
+        }
+      }
+    }
+
+    // Send control buttons
     const buttons = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId("create_voice_channel")
@@ -117,8 +162,10 @@ async function startMatch(platform, players, client) {
         .join(", ")}\n\n**Use the buttons below to manage the match.**`,
       components: [buttons],
     });
+
+    return { matchId, threadId: thread.id, players };
   } catch (error) {
-    logger.error(`❌ Error starting match: ${error.message}`, error.stack);
+    console.error("❌ Error in startMatch:", error.stack || error.message);
   }
 }
 

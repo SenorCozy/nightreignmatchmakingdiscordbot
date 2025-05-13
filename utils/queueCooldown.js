@@ -1,4 +1,5 @@
 // utils/queueCooldown.js
+const db = require("../database");
 
 async function enforceQueueCooldown(playerId) {
   const lastQueueTime = await new Promise((resolve, reject) => {
@@ -7,7 +8,7 @@ async function enforceQueueCooldown(playerId) {
       [playerId],
       (err, row) => {
         if (err) {
-          logger.error("Error checking last queue time:", err.message);
+          console.error("Error checking last queue time:", err.message);
           return reject(err);
         }
         resolve(row?.queue_entered_at || 0);
@@ -25,7 +26,7 @@ async function enforceQueueCooldown(playerId) {
     );
   }
 
-  logger.debug(`✅ Cooldown check passed for player ${playerId}`);
+  console.debug(`✅ Cooldown check passed for player ${playerId}`);
 }
 
 module.exports = { enforceQueueCooldown };

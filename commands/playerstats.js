@@ -43,6 +43,9 @@ module.exports = {
         ? `<@${mostCommonDuo.partner_id}> (${mostCommonDuo.count} matches)`
         : "N/A";
 
+      const totalMatchMins = stats.total_match_time
+        ? `${Math.round(stats.total_match_time / 60)} min`
+        : "N/A";
       const response = `
         **Statistics for ${targetUser.username}:**
         - **Queue Entries (Total):** ${stats.queue_entries || 0}
@@ -55,11 +58,12 @@ module.exports = {
         - **Most Common Duo Partner:** ${duoPartnerInfo}
         - **Failed Ready Checks:** ${stats.failed_ready_checks || 0}
         - **Longest Match Duration:** ${longestMatch}
+        - **Total Match Time:** ${totalMatchMins}
         `;
 
       return interaction.reply({ content: response, flags: 64 });
     } catch (error) {
-      logger.error("❌ Error in /statistics:", error);
+      console.error("❌ Error in /statistics:", error);
       return interaction.reply({
         content: "❌ An error occurred while retrieving statistics.",
         flags: 64,

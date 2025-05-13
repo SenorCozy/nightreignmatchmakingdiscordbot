@@ -1,15 +1,17 @@
-// buttons/end_match_now.js
-const { PermissionFlagsBits } = require("discord.js");
 const db = require("../../database");
+const { cleanupMatch } = require("../../utils/matchmakingUtils/matchUtils");
 
 module.exports = {
   customId: "end_match_now",
   async execute(interaction) {
+    const thread = interaction.channel;
     try {
-      const thread = interaction.channel;
-      const guild = interaction.guild;
-
       await interaction.deferReply({ flags: 64 }).catch(() => {});
+
+      const stillExists = await thread.guild.channels
+        .fetch(thread.id)
+        .catch(() => null);
+      if (!stillExists) return;
 
       const dbResult = await new Promise((resolve, reject) => {
         db.get(
@@ -20,48 +22,19 @@ module.exports = {
       });
 
       if (!dbResult) {
-        return interaction
-          .editReply({ content: "❌ No active match found." })
-          .catch(() => {});
+        return interaction.editReply({
+          content: "❌ No active match found.",
+        });
       }
 
-      const { voiceChannelId } = dbResult;
-
-      await new Promise((resolve, reject) => {
-        db.run(`DELETE FROM channels WHERE threadId = ?`, [thread.id], (err) =>
-          err ? reject(err) : resolve()
-        );
+      await cleanupMatch({
+        thread,
+        voiceChannelId: dbResult.voiceChannelId,
+        closedByUserOrBot: interaction.user,
+        closureReason: "Ended via End Match Now button",
       });
-
-      await thread
-        .send(
-          "⚠️ **Match has been force-ended by a player. The match will end shortly.**"
-        )
-        .catch(() => {});
-
-      const threadMembers = thread.members.cache.map((m) => m.id);
-      for (const playerId of threadMembers) {
-        await thread.members.remove(playerId).catch(() => {});
-        await thread.permissionOverwrites
-          .edit(playerId, {
-            ViewChannel: false,
-            SendMessages: false,
-          })
-          .catch(() => {});
-      }
-
-      if (voiceChannelId) {
-        const voiceChannel = guild.channels.cache.get(voiceChannelId);
-        if (voiceChannel) {
-          await voiceChannel.delete().catch(() => {});
-        }
-      }
-
-      setTimeout(async () => {
-        await thread.delete().catch(() => {});
-      }, 5000);
     } catch (error) {
-      logger.error("❌ Error handling end_match_now:", error.message);
+      console.error("❌ Error handling end_match_now:", error.message);
       await interaction
         .editReply({ content: "❌ Error ending match." })
         .catch(() => {});

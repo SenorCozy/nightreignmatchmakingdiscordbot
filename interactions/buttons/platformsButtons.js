@@ -1,8 +1,8 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 const db = require("../../database");
 
-const { getPlayerById } = require("../utils/playerUtils");
-const { playerPlatformSelection } = require("../utils/globalState");
+const { getPlayerById } = require("../../utils/playerUtils");
+const { playerPlatformSelection } = require("../../utils/globalState");
 
 module.exports = {
   regex: /^platform_(pc|xbox|playstation)$/,
@@ -69,7 +69,7 @@ module.exports = {
         flags: 64,
       });
     } catch (error) {
-      logger.error(`❌ Error handling platform button (${customId}):`, error);
+      console.error(`❌ Error handling platform button (${customId}):`, error);
       return interaction.reply({
         content: "❌ Something went wrong while selecting your platform.",
         flags: 64,

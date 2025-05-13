@@ -38,7 +38,7 @@ module.exports = {
         flags: 64,
       });
     } catch (error) {
-      logger.error("❌ Error executing /clear:", error);
+      console.error("❌ Error executing /clear:", error);
       return interaction.reply({
         content:
           "❌ An error occurred while attempting to clear the user. Please check logs.",

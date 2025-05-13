@@ -6,15 +6,16 @@ const {
   ComponentType,
 } = require("discord.js");
 const db = require("../database");
+const { cleanupMatch } = require("../utils/matchmakingUtils/matchUtils");
 
 require("dotenv").config();
-const { hasQueueModRole } = require("../utils/permissions");
 
 const ALLOWED_ROLE_IDS = [
   process.env.TICKET_HANDLER_ROLE,
   process.env.ELDEN_MODERATOR_ROLE,
   process.env.ELDEN_ENFORCER_ROLE,
-];
+  process.env.BOT_ROLE,
+].filter(Boolean);
 
 function hasModRole(member) {
   return ALLOWED_ROLE_IDS.some((roleId) => member.roles.cache.has(roleId));
@@ -38,41 +39,68 @@ module.exports = {
         });
       }
 
-      // Fetch match data
       const match = await new Promise((resolve, reject) => {
         db.get(
-          `SELECT playerIds, voiceChannelId FROM channels WHERE threadId = ?`,
+          `SELECT match_id, voiceChannelId FROM channels WHERE threadId = ?`,
           [thread.id],
           (err, row) => (err ? reject(err) : resolve(row))
         );
       });
 
-      if (!match) {
+      if (!match?.match_id) {
         return interaction.reply({
           content: "❌ No active match found for this thread.",
           flags: 64,
         });
       }
 
-      const { playerIds, voiceChannelId } = match;
-      const players = playerIds.split(",");
+      const { match_id, voiceChannelId } = match;
 
-      // Role-based override
-      const canForceEnd = hasModRole(interaction.member);
+      const activePlayers = await new Promise((resolve, reject) => {
+        db.all(
+          `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
+          [match_id],
+          (err, rows) =>
+            err ? reject(err) : resolve(rows.map((r) => r.playerId))
+        );
+      });
 
-      if (canForceEnd) {
-        await interaction.reply("⏳ Match will end in **10 seconds**...");
+      if (activePlayers.length === 0) {
+        return interaction.reply({
+          content: "⚠️ No active players found for this match.",
+          flags: 64,
+        });
+      }
 
-        for (let i = 10; i > 0; i--) {
+      // ✅ Moderator override
+      if (hasModRole(interaction.member)) {
+        await thread.send("✅ Match will end shortly...");
+
+        for (let i = 5; i > 0; i--) {
+          const stillExists = await thread.guild.channels
+            .fetch(thread.id)
+            .catch(() => null);
+          if (!stillExists) return;
+
           await thread.send(`**${i}...**`).catch(() => {});
           await new Promise((r) => setTimeout(r, 1000));
         }
 
-        await cleanupMatch({ thread, voiceChannelId });
+        const stillExists = await thread.guild.channels
+          .fetch(thread.id)
+          .catch(() => null);
+        if (!stillExists) return;
+
+        await cleanupMatch({
+          thread,
+          voiceChannelId,
+          closedByUserOrBot: interaction.user,
+          closureReason: "Manually ended by moderator via /end",
+        });
         return;
       }
 
-      // Vote flow
+      // 🗳️ Player vote-based ending
       await interaction.reply({
         content: `🗳️ <@${interaction.user.id}> has requested to end the match.\nA second player must confirm to proceed.`,
         components: [
@@ -83,6 +111,7 @@ module.exports = {
               .setStyle(ButtonStyle.Danger)
           ),
         ],
+        flags: 64,
       });
 
       const collectedUsers = new Set([interaction.user.id]);
@@ -92,30 +121,46 @@ module.exports = {
         time: 60000,
       });
 
-      collector.on("collect", async (buttonInteraction) => {
-        if (!players.includes(buttonInteraction.user.id)) {
-          return buttonInteraction.reply({
+      collector.on("collect", async (btnInteraction) => {
+        if (!activePlayers.includes(btnInteraction.user.id)) {
+          return btnInteraction.reply({
             content: "❌ You are not part of this match and cannot confirm.",
             flags: 64,
           });
         }
 
-        collectedUsers.add(buttonInteraction.user.id);
+        collectedUsers.add(btnInteraction.user.id);
 
         if (collectedUsers.size >= 2) {
           collector.stop();
 
           await thread.send(
-            "✅ Vote passed. Match will end in **10 seconds**..."
+            "✅ Vote passed. Match will end in **5 seconds**..."
           );
-          for (let i = 10; i > 0; i--) {
+
+          for (let i = 5; i > 0; i--) {
+            const stillExists = await thread.guild.channels
+              .fetch(thread.id)
+              .catch(() => null);
+            if (!stillExists) return;
+
             await thread.send(`**${i}...**`).catch(() => {});
             await new Promise((r) => setTimeout(r, 1000));
           }
 
-          await cleanupMatch({ thread, voiceChannelId });
+          const stillExists = await thread.guild.channels
+            .fetch(thread.id)
+            .catch(() => null);
+          if (!stillExists) return;
+
+          await cleanupMatch({
+            thread,
+            voiceChannelId,
+            closedByUserOrBot: btnInteraction.user,
+            closureReason: "Match ended via player vote (/end)",
+          });
         } else {
-          await buttonInteraction
+          await btnInteraction
             .reply({
               content: `Confirmation received. (${collectedUsers.size}/2 confirmed)`,
               flags: 64,
@@ -139,7 +184,7 @@ module.exports = {
         }
       });
     } catch (error) {
-      logger.error("❌ Error executing /end:", error);
+      console.error("❌ Error executing /end:", error);
       return interaction.reply({
         content: "❌ An unexpected error occurred. Please try again.",
         flags: 64,
