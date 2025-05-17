@@ -1,23 +1,23 @@
-const { ChannelType } = require("discord.js");
+const { ChannelType, PermissionsBitField } = require("discord.js");
 const db = require("../database");
+const logger = require("../logger");
+
 function updateLastActivity(threadId) {
   db.run(
     `UPDATE channels SET lastActivity = ? WHERE threadId = ?`,
     [Date.now(), threadId],
     (err) => {
       if (err) {
-        console.warn(
-          `⚠️ Failed to update lastActivity for ${threadId}:`,
-          err.message
-        );
+        logger.errorWrapper("UpdateLastActivity", err, { threadId });
       }
     }
   );
 }
+
 async function safeAddToThread(thread, playerId) {
   try {
     if (!thread || !thread.members) {
-      console.warn(
+      logger.warn(
         `safeAddToThread: Invalid thread or missing members (${thread?.id})`
       );
       return;
@@ -25,16 +25,16 @@ async function safeAddToThread(thread, playerId) {
 
     const guildMember = thread.guild.members.cache.get(playerId);
     if (!guildMember) {
-      console.warn(`safeAddToThread: Player ${playerId} not found in guild.`);
+      logger.warn(`safeAddToThread: Player ${playerId} not found in guild.`);
       return;
     }
 
     const botHasPermission = thread
       .permissionsFor(thread.client.user)
-      ?.has("ManageThreads");
+      ?.has(PermissionsBitField.Flags.ManageThreads);
 
     if (!botHasPermission) {
-      console.warn(
+      logger.warn(
         `safeAddToThread: Bot lacks ManageThreads permission in thread ${thread.id}`
       );
       return;
@@ -42,34 +42,22 @@ async function safeAddToThread(thread, playerId) {
 
     await thread.members
       .add(playerId)
-      .then(() => console.info(`✅ Added ${playerId} to thread ${thread.id}`))
-
-      .catch((error) =>
-        console.error(
-          `safeAddToThread: Failed to add ${playerId} to thread ${thread.id}:`,
-          error.message
-        )
-      );
-    updateLastActivity(thread.id);
-
-    if (
-      thread.type === ChannelType.GuildPrivateThread &&
-      thread.permissionOverwrites
-    ) {
-      await thread.permissionOverwrites.edit(playerId, {
-        ViewChannel: true,
-        SendMessages: true,
-        ManageThreads: False,
+      .then(() => {
+        logger.info(`✅ Added ${playerId} to thread ${thread.id}`);
+      })
+      .catch((error) => {
+        logger.errorWrapper("SafeAddToThread_Add", error, {
+          playerId,
+          threadId: thread.id,
+        });
       });
-      console.info(
-        `✅ Granted ${playerId} access to private thread ${thread.id}`
-      );
-    }
+
+    updateLastActivity(thread.id);
   } catch (error) {
-    console.error(
-      `safeAddToThread: Unexpected error for ${playerId} in thread ${thread?.id}:`,
-      error.message
-    );
+    logger.errorWrapper("SafeAddToThread_Catch", error, {
+      playerId,
+      threadId: thread?.id,
+    });
   }
 }
 
@@ -86,12 +74,12 @@ async function getOrCreateCategory(guild, platform) {
         name: `Nightreign-${platform}`,
         type: ChannelType.GuildCategory,
       });
-      console.info(`Created category: Nightreign-${platform}`);
+      logger.info(`📁 Created category: Nightreign-${platform}`);
     }
 
     return category;
   } catch (error) {
-    console.error("Error fetching or creating category:", error.message);
+    logger.errorWrapper("GetOrCreateCategory", error, { platform });
     throw new Error("Failed to get or create category.");
   }
 }
@@ -114,7 +102,7 @@ async function getOrCreatePlatformChannel(guild, platform) {
       topic: `Platform-specific matchmaking channel for ${platform}`,
       parent: category.id,
     });
-    console.info(`Created platform channel: ${channelName}`);
+    logger.info(`💬 Created platform channel: ${channelName}`);
   }
 
   return channel;

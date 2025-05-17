@@ -169,10 +169,6 @@ async function searchForPlayers(thread, requestedPlayers, interaction = null) {
     for (const playerId of queuedPlayers) {
       try {
         await thread.members.add(playerId);
-        await thread.permissionOverwrites.edit(playerId, {
-          ViewChannel: true,
-          SendMessages: true,
-        });
 
         if (voiceChannelId) {
           const vc = thread.guild.channels.cache.get(voiceChannelId);

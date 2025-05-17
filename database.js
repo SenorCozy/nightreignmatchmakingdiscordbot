@@ -17,9 +17,9 @@ if (!fs.existsSync(backupDir)) {
 
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
-    logger.error("Error opening database:", err.message);
+    logger.errorWrapper("DatabaseOpen", err);
   } else {
-    console.log("Connected to the matchmaking database.");
+    logger.info("✅ Connected to the matchmaking database.");
 
     // ✅ Players Table
     db.run(`
@@ -44,6 +44,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
         lastReadyCheck INTEGER DEFAULT 0
       )
     `);
+
     // ✅ Match Events Table (for join/leave/kick history)
     db.run(`
   CREATE TABLE IF NOT EXISTS match_events (
@@ -131,6 +132,7 @@ const db = new sqlite3.Database(dbPath, (err) => {
   closed_by TEXT DEFAULT NULL,
   closure_reason TEXT DEFAULT NULL
 )`);
+
     // ✅ Transcripts Table for Match Threads
     db.run(`
 CREATE TABLE IF NOT EXISTS transcripts (
@@ -165,7 +167,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
   )
 `);
 
-    console.log("✅ Database schema verified and initialized.");
+    logger.info("✅ Database schema verified and initialized.");
   }
 });
 

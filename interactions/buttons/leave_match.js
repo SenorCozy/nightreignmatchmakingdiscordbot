@@ -123,12 +123,6 @@ module.exports = {
 
       // ✅ Remove from thread and VC
       await thread.members.remove(userId).catch(() => {});
-      await thread.permissionOverwrites
-        .edit(userId, {
-          ViewChannel: false,
-          SendMessages: false,
-        })
-        .catch(() => {});
 
       if (voiceChannelId) {
         const vc = thread.guild.channels.cache.get(voiceChannelId);

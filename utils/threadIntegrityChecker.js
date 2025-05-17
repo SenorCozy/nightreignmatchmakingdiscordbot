@@ -1,4 +1,5 @@
 const db = require("../database");
+const logger = require("../logger");
 const { removePlayerFromMatch } = require("../utils/playerUtils");
 const { cleanupMatch } = require("../utils/matchmakingUtils/matchUtils");
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
@@ -19,7 +20,7 @@ async function checkThreadIntegrity(client) {
       );
     });
   } catch (error) {
-    console.error("❌ Failed to load matchThreads:", error);
+    logger.errorWrapper("ThreadIntegrity_LoadMatchThreads", error);
     return;
   }
 
@@ -30,7 +31,7 @@ async function checkThreadIntegrity(client) {
     })
     .filter(Boolean);
 
-  console.log(`🔍 Running thread integrity check on ${threads.length} threads`);
+  logger.info(`🔍 Running thread integrity check on ${threads.length} threads`);
 
   for (const { thread, match_id, voiceChannelId } of threads) {
     try {
@@ -65,7 +66,9 @@ async function checkThreadIntegrity(client) {
               }
             }
           } catch (error) {
-            console.error(`Error fetching member ${playerId}:`, error);
+            logger.errorWrapper("ThreadIntegrity_FetchMember", error, {
+              playerId,
+            });
           }
 
           try {
@@ -79,7 +82,7 @@ async function checkThreadIntegrity(client) {
             });
 
             if (isLeaving) {
-              console.log(
+              logger.info(
                 `⏭️ Skipping ${playerId} — leave already in progress.`
               );
               continue;
@@ -107,14 +110,11 @@ async function checkThreadIntegrity(client) {
               ]
             );
 
-            await removePlayerFromMatch(playerId, thread.id).catch(() => {});
-
-            await thread.permissionOverwrites
-              .edit(playerId, {
-                ViewChannel: false,
-                SendMessages: false,
-              })
-              .catch(() => {});
+            await removePlayerFromMatch(playerId, thread.id).catch((e) => {
+              logger.warn(
+                `removePlayerFromMatch failed for ${playerId}: ${e.message}`
+              );
+            });
 
             if (voiceChannelId) {
               const vc = thread.guild.channels.cache.get(voiceChannelId);
@@ -126,7 +126,7 @@ async function checkThreadIntegrity(client) {
                   })
                   .catch(() => {});
                 const member = vc.members.get(playerId);
-                if (member && member.voice) {
+                if (member?.voice) {
                   await member.voice.disconnect().catch(() => {});
                 }
               }
@@ -172,12 +172,14 @@ async function checkThreadIntegrity(client) {
               await new Promise((r) => setTimeout(r, 750));
             }
           } catch (error) {
-            console.error(`❌ Error handling player ${playerId}:`, error);
+            logger.errorWrapper("ThreadIntegrity_PlayerHandling", error, {
+              playerId,
+            });
           }
         }
       }
     } catch (error) {
-      console.error("❌ Thread integrity check failed:", error);
+      logger.errorWrapper("ThreadIntegrity_ThreadCheck", error);
     }
   }
 }

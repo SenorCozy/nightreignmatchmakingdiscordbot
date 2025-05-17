@@ -1,26 +1,27 @@
-// utils/statistics.js
 const db = require("../database");
+const logger = require("../logger");
+
 async function incrementBotStatistic(statKey, incrementBy = 1) {
   try {
     await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO bot_statistics (stat_key, stat_value)
-           VALUES (?, ?)
-           ON CONFLICT(stat_key) DO UPDATE SET 
-             stat_value = stat_value + ?`,
+         VALUES (?, ?)
+         ON CONFLICT(stat_key) DO UPDATE SET 
+           stat_value = stat_value + ?`,
         [statKey, incrementBy, incrementBy],
         (err) => {
           if (err) {
-            console.error("Error incrementing bot statistic:", err.message);
+            logger.errorWrapper("IncrementBotStat_DB", err, { statKey });
             return reject(err);
           }
           resolve();
         }
       );
     });
-    console.info(`📈 Incremented statistic: ${statKey} by ${incrementBy}`);
+    logger.info(`📈 Incremented statistic: ${statKey} by ${incrementBy}`);
   } catch (error) {
-    console.error("❌ Error in incrementBotStatistic:", error.message);
+    logger.errorWrapper("IncrementBotStatistic", error, { statKey });
   }
 }
 
@@ -28,9 +29,10 @@ async function updateQueueStatistics(playerId, platform, isSolo) {
   const soloIncrement = isSolo ? 1 : 0;
   const duoIncrement = isSolo ? 0 : 1;
 
-  await new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO player_statistics (id, queue_entries, queue_entries_solo, queue_entries_duo, top_platform)
+  try {
+    await new Promise((resolve, reject) => {
+      db.run(
+        `INSERT INTO player_statistics (id, queue_entries, queue_entries_solo, queue_entries_duo, top_platform)
          VALUES (?, 1, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET 
            queue_entries = queue_entries + 1,
@@ -40,27 +42,33 @@ async function updateQueueStatistics(playerId, platform, isSolo) {
              WHEN top_platform = ? THEN top_platform
              ELSE ?
            END`,
-      [
-        playerId,
-        soloIncrement,
-        duoIncrement,
-        platform,
-        soloIncrement,
-        duoIncrement,
-        platform,
-        platform,
-      ],
-      (err) => {
-        if (err) {
-          console.error("❌ Error updating queue statistics:", err.message);
-          return reject(err);
+        [
+          playerId,
+          soloIncrement,
+          duoIncrement,
+          platform,
+          soloIncrement,
+          duoIncrement,
+          platform,
+          platform,
+        ],
+        (err) => {
+          if (err) {
+            logger.errorWrapper("UpdateQueueStats_DB", err, {
+              playerId,
+              platform,
+            });
+            return reject(err);
+          }
+          resolve();
         }
-        resolve();
-      }
-    );
-  });
+      );
+    });
 
-  console.info(`📊 Updated queue statistics for ${playerId}`);
+    logger.info(`📊 Updated queue statistics for ${playerId}`);
+  } catch (error) {
+    logger.errorWrapper("UpdateQueueStatistics", error, { playerId });
+  }
 }
 
 async function trackUniqueUser(userId) {
@@ -71,7 +79,7 @@ async function trackUniqueUser(userId) {
         [userId],
         (err, row) => {
           if (err) {
-            console.error("Error checking if user is unique:", err.message);
+            logger.errorWrapper("TrackUser_Check", err, { userId });
             return reject(err);
           }
           resolve(!!row); // true if exists
@@ -83,16 +91,13 @@ async function trackUniqueUser(userId) {
       await new Promise((resolve, reject) => {
         db.run(
           `INSERT INTO bot_statistics (stat_key, stat_value)
-             VALUES ('unique_users', 1)
-             ON CONFLICT(stat_key) DO UPDATE SET 
-               stat_value = stat_value + 1`,
+           VALUES ('unique_users', 1)
+           ON CONFLICT(stat_key) DO UPDATE SET 
+             stat_value = stat_value + 1`,
           [],
           (err) => {
             if (err) {
-              console.error(
-                "Error incrementing unique_users statistic:",
-                err.message
-              );
+              logger.errorWrapper("TrackUser_Insert", err, { userId });
               return reject(err);
             }
             resolve();
@@ -100,10 +105,10 @@ async function trackUniqueUser(userId) {
         );
       });
 
-      console.info(`🧍 Tracked new unique user: ${userId}`);
+      logger.info(`🧍 Tracked new unique user: ${userId}`);
     }
   } catch (error) {
-    console.error("Error in trackUniqueUser:", error.message);
+    logger.errorWrapper("TrackUniqueUser", error, { userId });
   }
 }
 

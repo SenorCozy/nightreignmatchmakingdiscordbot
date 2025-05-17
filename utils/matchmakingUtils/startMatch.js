@@ -30,6 +30,27 @@ async function startMatch(client, platform, players) {
     ];
 
     const guild = client.guilds.cache.first();
+
+    const fetchedChannels = await guild.channels.fetch();
+    const activeThreads = fetchedChannels.filter((c) => c.isThread()).size;
+
+    if (activeThreads >= 1000) {
+      console.warn("🚨 Cannot start match — thread limit (1000) reached.");
+
+      // Revert players back to queue
+      const placeholders = players.map(() => "?").join(", ");
+      await new Promise((resolve, reject) => {
+        db.run(
+          `UPDATE players SET status = 'queued' 
+       WHERE id IN (${placeholders})`,
+          players,
+          (err) => (err ? reject(err) : resolve())
+        );
+      });
+
+      return { error: "Thread limit reached — match aborted.", players };
+    }
+
     const platformChannel = await getOrCreatePlatformChannel(guild, platform);
 
     // Prevent duplicate match entry

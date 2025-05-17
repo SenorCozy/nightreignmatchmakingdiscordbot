@@ -57,4 +57,15 @@ class DiscordTransport extends TransportStream {
 // Add the Discord transport to the logger
 logger.add(new DiscordTransport());
 
+// Add this just before `module.exports = logger;`
+
+logger.errorWrapper = function (context, err, extra = {}) {
+  const baseMessage = `[${context}] ${err?.message || err}`;
+  const meta = {
+    stack: err?.stack,
+    ...extra,
+  };
+  this.error(baseMessage, meta);
+};
+
 module.exports = logger;

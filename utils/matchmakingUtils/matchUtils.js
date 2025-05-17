@@ -85,6 +85,9 @@ async function cleanupMatch({
       )
     );
 
+    console.info(`📝 Generating transcript for match ${match_id}...`);
+    await generateMatchTranscript(thread, closedByUserOrBot, closureReason);
+
     for (const { playerId, status } of playerStatuses) {
       let finalStatus = status;
 
@@ -141,11 +144,10 @@ async function cleanupMatch({
         );
       }
     }
+    console.info(`📝 Generating transcript for match ${match_id}...`);
 
     await addToTotalMatchTime(matchDuration);
     await updateGlobalLongestMatch(matchDuration);
-
-    await generateMatchTranscript(thread, closedByUserOrBot, closureReason);
 
     try {
       await thread.delete("Cleaning up match");
@@ -284,12 +286,50 @@ async function generateMatchTranscript(
       );
     });
 
+    // Final active players
     const activePlayers = await new Promise((resolve, reject) => {
       db.all(
         `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
         [match_id],
         (err, rows) =>
           err ? reject(err) : resolve(rows.map((r) => `<@${r.playerId}>`))
+      );
+    });
+
+    // Deprecated players with final_status and reason
+    const deprecatedPlayers = await new Promise((resolve, reject) => {
+      db.all(
+        `SELECT playerId, final_status, reason 
+     FROM match_events 
+     WHERE match_id = ? 
+       AND eventType IN ('leave', 'kick', 'readycheck_fail')
+     GROUP BY playerId`,
+        [match_id],
+        (err, rows) =>
+          err
+            ? reject(err)
+            : resolve(
+                rows.map(
+                  (r) =>
+                    `<@${r.playerId}> (${r.final_status || "unknown"}${
+                      r.reason ? `: ${r.reason}` : ""
+                    })`
+                )
+              )
+      );
+    });
+
+    const voiceChannelId = await new Promise((resolve, reject) => {
+      db.get(
+        `SELECT voiceChannelId FROM channels WHERE match_id = ?`,
+        [match_id],
+        (err, row) => (err ? reject(err) : resolve(row?.voiceChannelId || null))
+      );
+    });
+
+    const matchCount = await new Promise((resolve, reject) => {
+      db.get(`SELECT COUNT(*) AS count FROM matches`, [], (err, row) =>
+        err ? reject(err) : resolve(row.count)
       );
     });
 
@@ -369,18 +409,37 @@ async function generateMatchTranscript(
 
     const embed = new EmbedBuilder()
       .setColor(0xff0000)
-      .setTitle("📜 Match Closed")
+      .setTitle(`📜 Match #${matchCount} Closed`)
       .addFields(
-        { name: "🧵 Thread", value: `<#${thread.id}>`, inline: true },
         { name: "🆔 Match ID", value: match_id, inline: true },
         { name: "🔒 Closed By", value: `<@${closedBy.id}>`, inline: true },
         {
-          name: "🎮 Players",
+          name: "🎮 Active Players",
           value: activePlayers.length > 0 ? activePlayers.join(", ") : "None",
         },
+        {
+          name: "🚪 Deprecated Players",
+          value:
+            deprecatedPlayers.length > 0
+              ? deprecatedPlayers.join(", ")
+              : "None",
+        },
+        {
+          name: "🔊 Voice Channel",
+          value: voiceChannelId ? `<#${voiceChannelId}>` : "Not created",
+          inline: true,
+        },
         { name: "📄 Reason", value: closureReason },
-        { name: "🕓 Created", value: formatTime(createdAt), inline: true },
-        { name: "🕓 Closed", value: formatTime(closedAt), inline: true }
+        {
+          name: "🕓 Created",
+          value: formatTime(createdAt),
+          inline: true,
+        },
+        {
+          name: "🕓 Closed",
+          value: formatTime(closedAt),
+          inline: true,
+        }
       );
 
     const row = new ActionRowBuilder().addComponents(

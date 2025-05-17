@@ -1,5 +1,5 @@
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 const { getPlayerById } = require("../../utils/playerUtils");
+const sendDuoLeavePrompt = require("../../utils/sendDuoLeavePrompt");
 const db = require("../../database");
 
 module.exports = {
@@ -23,6 +23,9 @@ module.exports = {
         });
       }
 
+      // Acknowledge the interaction early
+      await interaction.deferUpdate();
+
       // ✅ Duo unlink logic
       if (player.duoPartner) {
         const partnerId = player.duoPartner;
@@ -39,40 +42,8 @@ module.exports = {
           `Duo partnership cleared for ${playerId} and ${partnerId}`
         );
 
-        const dmEmbed = {
-          content: `⚠️ Your duo partner has left the queue. You are now queued as a solo.\nWould you like to leave the queue too?`,
-          components: [
-            new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setCustomId(`leave_queue_${partnerId}`)
-                .setLabel("Leave Queue")
-                .setStyle(ButtonStyle.Danger)
-            ),
-          ],
-        };
-
-        const partnerMember = interaction.guild.members.cache.get(partnerId);
-        if (partnerMember) {
-          try {
-            await partnerMember.send(dmEmbed);
-            console.info(`✅ Sent DM to ${partnerId} about duo leave.`);
-          } catch {
-            console.warn(
-              `⚠️ Could not DM ${partnerId}, falling back to public alert.`
-            );
-            const fallbackChannel = interaction.guild.channels.cache.find(
-              (ch) =>
-                ch.name === process.env.QUEUE_ALERT_CHANNEL_NAME &&
-                ch.isTextBased()
-            );
-            if (fallbackChannel) {
-              await fallbackChannel.send({
-                content: `<@${partnerId}>`,
-                ...dmEmbed,
-              });
-            }
-          }
-        }
+        // ✅ Use shared utility for DM + fallback
+        await sendDuoLeavePrompt(interaction.guild, partnerId);
       }
 
       // ✅ Delete from players table
@@ -82,28 +53,32 @@ module.exports = {
           [playerId, "queued"],
           function (err) {
             if (err) return reject(err);
-            resolve(this.changes); // number of rows affected
+            resolve(this.changes);
           }
         );
       });
 
       if (result === 0) {
-        return interaction.reply({
+        return interaction.followUp({
           content: "❌ You were not in the queue or have already been removed.",
           flags: 64,
         });
       }
 
-      return interaction.reply({
+      return interaction.followUp({
         content: "✅ You've been removed from the matchmaking queue.",
         flags: 64,
       });
     } catch (error) {
       console.error("Error handling remove_from_queue:", error.message);
-      return interaction.reply({
-        content: "❌ An error occurred while leaving the queue.",
-        flags: 64,
-      });
+      try {
+        return interaction.followUp({
+          content: "❌ An error occurred while leaving the queue.",
+          flags: 64,
+        });
+      } catch (fallbackErr) {
+        console.error("❌ Failed to send followUp:", fallbackErr.message);
+      }
     }
   },
 };

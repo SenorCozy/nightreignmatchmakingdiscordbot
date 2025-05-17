@@ -6,6 +6,7 @@ const {
 } = require("../playerUtils");
 
 let isMatchmakingRunning = false;
+let lastThreadLimitWarning = 0; // ⏱️ Track last thread limit log time
 
 async function runMatchmaking(client, db) {
   console.log("⏳ Starting matchmaking run...");
@@ -26,6 +27,24 @@ async function runMatchmaking(client, db) {
     const guild = client.guilds.cache.first();
     if (!guild) {
       console.warn("❌ No guilds available.");
+      return;
+    }
+
+    // 🔍 Fetch full list of channels to ensure up-to-date count and make sure not at 1000 thread limit
+    const fetchedChannels = await guild.channels.fetch();
+    const activeThreads = fetchedChannels.filter((c) => c.isThread()).size;
+    console.log(`🔍 Active thread #: ${activeThreads}`);
+
+    if (activeThreads >= 1000) {
+      const now = Date.now();
+      if (now - lastThreadLimitWarning > 60000) {
+        console.warn(
+          "🚨 Thread limit reached (1000). Skipping matchmaking run."
+        );
+        lastThreadLimitWarning = now;
+      } else {
+        console.debug("⏳ Thread limit still reached. Suppressing repeat log.");
+      }
       return;
     }
 
@@ -73,15 +92,6 @@ async function runMatchmaking(client, db) {
 
       for (const p of queuedPlayers) {
         await handleOrphanedDuos(p.id);
-      }
-
-      const threadLimitReached =
-        guild.channels.cache.filter((c) => c.isThread()).size >= 1000;
-      if (threadLimitReached) {
-        console.warn(
-          `🚨 Cannot start new match for ${platform} – thread limit reached.`
-        );
-        continue;
       }
 
       const solos = [];

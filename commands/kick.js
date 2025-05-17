@@ -157,12 +157,6 @@ module.exports = {
           await removePlayerFromMatch(playerId, thread.id, "kicked_via_vote");
 
           await thread.members.remove(playerId).catch(() => {});
-          await thread.permissionOverwrites
-            .edit(playerId, {
-              ViewChannel: false,
-              SendMessages: false,
-            })
-            .catch(() => {});
 
           if (match.voiceChannelId) {
             const vc = thread.guild.channels.cache.get(match.voiceChannelId);

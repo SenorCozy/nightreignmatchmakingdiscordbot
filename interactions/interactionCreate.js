@@ -30,8 +30,14 @@ for (const file of buttonFiles) {
   const button = require(`./buttons/${file}`);
   if (button.customId && typeof button.execute === "function") {
     buttonHandlers.set(button.customId, button.execute);
-  } else if (button.regex && typeof button.execute === "function") {
-    regexHandlers.push(button);
+  } else if (
+    (button.regex || button.customIdRegex) &&
+    typeof button.execute === "function"
+  ) {
+    regexHandlers.push({
+      ...button,
+      regex: button.customIdRegex || button.regex,
+    });
   }
 }
 
