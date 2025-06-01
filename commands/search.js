@@ -172,8 +172,11 @@ async function searchForPlayers(thread, requestedPlayers, interaction = null) {
           [playerId]
         );
 
-        await incrementMatchesPlayed(playerId);
-        await trackQueueLeaveTimestamp(playerId);
+        // 🟡 Defer stat updates to prevent blocking match setup
+        setImmediate(() => {
+          incrementMatchesPlayed(playerId);
+          trackQueueLeaveTimestamp(playerId);
+        });
       } catch (err) {
         logger.warn("⚠️ Failed to update match/player records", {
           playerId,

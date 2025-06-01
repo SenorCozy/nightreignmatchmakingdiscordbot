@@ -18,6 +18,7 @@ const {
   checkMvpGivenAchievements,
   checkMvpReceivedAchievements,
   checkSelflessMvpAchievement,
+  checkDualMvp,
 } = require("../utils/achievementHelpers");
 
 module.exports = {
@@ -71,26 +72,26 @@ module.exports = {
 
         const [oldEnough, givenTooMany, cooldown, receivedTooMany] =
           await Promise.all([
-            isMatchOldEnough(matchId),
-            hasGivenTooManyToday(giverId),
+            // isMatchOldEnough(matchId),
+            // hasGivenTooManyToday(giverId),
             hasCooldownActive(giverId, receiverId),
             hasReceivedTooManyToday(receiverId),
           ]);
 
-        if (!oldEnough) {
-          return interaction.reply({
-            content:
-              "⏱️ You can only award MVPs after 15 minutes into a match.",
-            flags: 64,
-          });
-        }
+        // if (!oldEnough) {
+        //   return interaction.reply({
+        //     content:
+        //       "⏱️ You can only award MVPs after 15 minutes into a match.",
+        //     flags: 64,
+        //   });
+        // }
 
-        if (givenTooMany) {
-          return interaction.reply({
-            content: "🖐️ You've reached the daily MVP award limit (5 per 24h).",
-            flags: 64,
-          });
-        }
+        // if (givenTooMany) {
+        //   return interaction.reply({
+        //     content: "🖐️ You've reached the daily MVP award limit (5 per 24h).",
+        //     flags: 64,
+        //   });
+        // }
 
         if (cooldown) {
           await unlockAchievementIfNotEarned(giverId, "mvp_cooldown_abuse");
@@ -109,16 +110,19 @@ module.exports = {
 
         await applyMvpAward(giverId, receiverId, matchId);
 
+        // Force delay until SQLite write is guaranteed flushed
+        await new Promise((res) => setTimeout(res, 50));
+
+        // Then run the achievement checks
         await Promise.all([
           checkSelflessMvpAchievement(giverId, db),
           checkMvpGivenAchievements(giverId, db),
           checkMvpReceivedAchievements(receiverId, db),
-          unlockAchievementIfNotEarned(receiverId, "mvp_dual", db),
+          checkDualMvp(receiverId, matchId, db),
         ]);
 
         return interaction.reply({
           content: `✅ You awarded MVP to <@${receiverId}>! They gained **+1 currency**.`,
-          flags: 64,
         });
       } catch (error) {
         logger.errorWrapper("❌ MVP award error", error, {

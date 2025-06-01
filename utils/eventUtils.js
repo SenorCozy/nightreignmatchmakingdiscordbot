@@ -123,7 +123,18 @@ async function evaluateEventProgress(
                  WHERE player_id = ? AND event_id = ?`,
               [tier.tier_index, playerId, event.event_id]
             );
-            await checkCurrencyAchievements(playerId, db);
+
+            // ✅ Defer achievement check
+            setImmediate(() =>
+              checkCurrencyAchievements(playerId, db).catch((err) =>
+                logger.error("❌ Currency achievement check failed (tier)", {
+                  playerId,
+                  error: err,
+                  eventId: event.event_id,
+                  tierIndex: tier.tier_index,
+                })
+              )
+            );
           }
         }
 
@@ -154,8 +165,20 @@ async function evaluateEventProgress(
               `Completed event: ${event.name}`,
             ]
           );
-          await checkCurrencyAchievements(playerId, db);
+
+          // ✅ Defer achievement check
+          setImmediate(() =>
+            checkCurrencyAchievements(playerId, db).catch((err) =>
+              logger.error("❌ Currency achievement check failed (flat)", {
+                playerId,
+                error: err,
+                eventId: event.event_id,
+              })
+            )
+          );
         }
+
+        // 🎖️ Event completion achievements (inline okay)
         try {
           await checkEventCompletionAchievements(playerId);
         } catch (err) {

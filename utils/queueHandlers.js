@@ -29,6 +29,19 @@ const {
 } = require("../utils/statistics");
 
 const { enforceQueueCooldown } = require("../utils/queueCooldown");
+async function processSoloQueuePostActions(playerId, platform) {
+  try {
+    await evaluateEventProgress(playerId, "queue_entries", 1);
+    await evaluateEventProgress(playerId, "solo_queues", 1);
+
+    await updateQueueStatistics(playerId, platform, "solo");
+    await incrementBotStatistic("total_queue_entries");
+    await incrementBotStatistic(`queue_entries_${platform}`);
+    await trackUniqueUser(playerId);
+  } catch (err) {
+    logger.errorWrapper("processSoloQueuePostActions", err, { playerId });
+  }
+}
 
 async function handleSoloQueue(interaction) {
   const playerId = interaction.user.id;
@@ -56,10 +69,13 @@ async function handleSoloQueue(interaction) {
         });
       }
 
-      if (player.status === "queued") {
-        const queueType = player.duoPartner ? "Duo" : "Solo";
+      if (player?.status === "queued") {
+        let queueType = "Solo";
+        if (player.duoPartner) queueType = "Duo";
+        if (player.trioPartner1 && player.trioPartner2) queueType = "Trio";
+
         return interaction.reply({
-          content: `You're already queued as **${queueType}** on **${player.platform}**.\nPlease leave the queue before changing your selection.`,
+          content: `You're already queued as **${queueType}** on **${player.platform}**.\nPlease leave the queue before changing status.`,
           components: [
             new ActionRowBuilder().addComponents(
               new ButtonBuilder()
@@ -71,14 +87,18 @@ async function handleSoloQueue(interaction) {
           flags: 64,
         });
       }
-      // else: player exists but is not currently queued or active (e.g. 'left', 'removed'), continue to requeue them below.
+
+      // Player exists but is not currently queued or active (e.g. 'left', 'removed'), continue below.
     }
 
     await new Promise((resolve, reject) => {
       db.run(
         `INSERT INTO players (id, platform, status, queue_entered_at)
          VALUES (?, ?, 'queued', ?)
-         ON CONFLICT(id) DO UPDATE SET platform = excluded.platform, status = excluded.status, queue_entered_at = excluded.queue_entered_at`,
+         ON CONFLICT(id) DO UPDATE SET 
+           platform = excluded.platform, 
+           status = excluded.status, 
+           queue_entered_at = excluded.queue_entered_at`,
         [playerId, platform, Date.now()],
         (err) => (err ? reject(err) : resolve())
       );
@@ -107,15 +127,9 @@ async function handleSoloQueue(interaction) {
       ],
       flags: 64,
     });
-    // 🎯 Event Progress Tracking
-    await evaluateEventProgress(playerId, "queue_entries", 1);
-    await evaluateEventProgress(playerId, "solo_queues", 1);
 
-    // Statistics updates
-    await updateQueueStatistics(playerId, platform, "solo");
-    await incrementBotStatistic("total_queue_entries");
-    await incrementBotStatistic(`queue_entries_${platform}`);
-    await trackUniqueUser(playerId);
+    // 🧠 Defer post-queue logic
+    processSoloQueuePostActions(playerId, platform);
   } catch (error) {
     logger.errorWrapper("handleSoloQueue", error, { playerId });
     if (!interaction.replied) {
@@ -142,7 +156,10 @@ async function handleDuoQueue(interaction) {
     }
 
     if (player?.status === "queued") {
-      const queueType = player.duoPartner ? "Duo" : "Solo";
+      let queueType = "Solo";
+      if (player.duoPartner) queueType = "Duo";
+      if (player.trioPartner1 && player.trioPartner2) queueType = "Trio";
+
       return interaction.reply({
         content: `You're already queued as **${queueType}** on **${player.platform}**.\nPlease leave the queue before changing status.`,
         components: [
@@ -188,225 +205,212 @@ async function handleDuoQueue(interaction) {
   }
 }
 
-async function handleDuoQueueModal(interaction) {
+async function processDuoQueuePostActions(playerId, friendId, platform) {
   try {
-    const playerId = interaction.user.id;
-    const platform = playerPlatformSelection[playerId];
-
-    let friendUsername = interaction.fields.getTextInputValue(
-      "duo_partner_username"
-    );
-    friendUsername = friendUsername.trim().toLowerCase();
-
-    if (friendUsername.length < 2) {
-      return interaction.reply({
-        content: "❌ Please enter at least 2 characters.",
-        flags: 64,
-      });
-    }
-
-    if (!platform) {
-      return interaction.reply({
-        content: "❌ Platform not found. Please try again.",
-        flags: 64,
-      });
-    }
-
-    const passedCooldown = await enforceQueueCooldown(playerId, interaction);
-    if (!passedCooldown) return;
-
-    // Attempt to find partner in cache first
-    let friend = interaction.guild.members.cache.find(
-      (m) => m.user.username.toLowerCase() === friendUsername
-    );
-
-    // If not in cache, fetch all members
-    if (!friend) {
-      try {
-        await interaction.guild.members.fetch();
-        friend = interaction.guild.members.cache.find(
-          (m) => m.user.username.toLowerCase() === friendUsername
-        );
-      } catch (err) {
-        logger.warn("⚠️ Failed to fetch guild members for fallback lookup", {
-          error: err.message,
-        });
-      }
-    }
-
-    if (!friend) {
-      logger.warn("Duo partner not found", {
-        playerId,
-        attemptedUsername: friendUsername,
-      });
-      return interaction.reply({
-        content: `❌ Could not find a user named **${friendUsername}**.\nMake sure they’re in this server and their username is typed exactly.`,
-        flags: 64,
-      });
-    }
-
-    if (friend.id === playerId) {
-      return interaction.reply({
-        content: "❌ You cannot queue with yourself as your duo partner.",
-        flags: 64,
-      });
-    }
-
-    if (friend.user.bot) {
-      return interaction.reply({
-        content: "🤖 You cannot queue with a bot as your partner.",
-        flags: 64,
-      });
-    }
-
-    const friendId = friend.id;
-
-    const isBlacklisted = await new Promise((resolve, reject) => {
-      db.get(`SELECT id FROM blacklist WHERE id = ?`, [friendId], (err, row) =>
-        err ? reject(err) : resolve(!!row)
-      );
-    });
-
-    if (isBlacklisted) {
-      return interaction.reply({
-        content: `🚫 <@${friendId}> is blacklisted and cannot join the queue.`,
-        flags: 64,
-      });
-    }
-
-    const initiator = await getPlayerById(playerId);
-    const partner = await getPlayerById(friendId);
-
-    if (initiator?.status === "active") {
-      return interaction.reply({
-        content: "You're already in an active match.",
-        flags: 64,
-      });
-    }
-
-    if (partner?.status === "active") {
-      return interaction.reply({
-        content: "Your partner is in an active match.",
-        flags: 64,
-      });
-    }
-
-    if (
-      initiator?.status === "queued" &&
-      initiator.duoPartner &&
-      initiator.duoPartner !== friendId
-    ) {
-      return interaction.reply({
-        content: "You're already queued with someone else as your partner.",
-        flags: 64,
-      });
-    }
-
-    if (
-      partner?.status === "queued" &&
-      partner.duoPartner &&
-      partner.duoPartner !== playerId
-    ) {
-      return interaction.reply({
-        content: "Your partner is already queued with someone else.",
-        flags: 64,
-      });
-    }
-
-    const now = Date.now();
-
     await Promise.all([
-      new Promise((resolve, reject) => {
-        db.run(
-          `INSERT OR REPLACE INTO players 
-           (id, platform, status, duoPartner, queue_entered_at)
-           VALUES (?, ?, 'queued', ?, ?)`,
-          [playerId, platform, friendId, now],
-          (err) => (err ? reject(err) : resolve())
-        );
+      updateQueueStatistics(playerId, platform, "duo"),
+      updateQueueStatistics(friendId, platform, "duo"),
+      trackUniqueUser(playerId),
+      trackUniqueUser(friendId),
+      updateDuoPartnerStatistics(playerId, friendId),
+      evaluateEventProgress(playerId, "queue_entries", 1),
+      evaluateEventProgress(friendId, "queue_entries", 1),
+      evaluateEventProgress(playerId, "queue_duo", 1),
+      evaluateEventProgress(friendId, "queue_duo", 1),
+      evaluateEventProgress(playerId, "queue_with_user", {
+        partnerId: friendId,
       }),
-      new Promise((resolve, reject) => {
-        db.run(
-          `INSERT OR REPLACE INTO players 
-           (id, platform, status, duoPartner, queue_entered_at)
-           VALUES (?, ?, 'queued', ?, ?)`,
-          [friendId, platform, playerId, now],
-          (err) => (err ? reject(err) : resolve())
-        );
+      evaluateEventProgress(friendId, "queue_with_user", {
+        partnerId: playerId,
       }),
+      incrementBotStatistic("total_queue_entries", 2),
+      incrementBotStatistic(`queue_entries_${platform}`, 2),
+      incrementBotStatistic("queue_entries_duo", 1),
     ]);
-
-    await Promise.all([
-      db.runAsync(
-        `INSERT INTO queue_history (playerId, platform, duoPartner, queue_entered_at)
-         VALUES (?, ?, ?, ?)`,
-        [playerId, platform, friendId, now]
-      ),
-      db.runAsync(
-        `INSERT INTO queue_history (playerId, platform, duoPartner, queue_entered_at)
-         VALUES (?, ?, ?, ?)`,
-        [friendId, platform, playerId, now]
-      ),
-    ]);
-
-    await updateQueueStatistics(playerId, platform, "duo");
-    await updateQueueStatistics(friendId, platform, "duo");
-
-    await trackUniqueUser(playerId);
-    await trackUniqueUser(friendId);
-    await updateDuoPartnerStatistics(playerId, friendId);
-
-    await evaluateEventProgress(playerId, "queue_entries", 1);
-    await evaluateEventProgress(friendId, "queue_entries", 1);
-    await evaluateEventProgress(playerId, "queue_duo", 1);
-    await evaluateEventProgress(friendId, "queue_duo", 1);
-    await evaluateEventProgress(playerId, "queue_with_user", {
-      partnerId: friendId,
+  } catch (err) {
+    logger.errorWrapper("processDuoQueuePostActions", err, {
+      playerId,
+      friendId,
     });
-    await evaluateEventProgress(friendId, "queue_with_user", {
-      partnerId: playerId,
-    });
+  }
+}
 
-    await incrementBotStatistic("total_queue_entries", 2);
-    await incrementBotStatistic(`queue_entries_${platform}`, 2);
-    await incrementBotStatistic("queue_entries_duo", 1);
+async function handleDuoQueueModal(interaction) {
+  const playerId = interaction.user.id;
+  const platform = playerPlatformSelection[playerId];
 
-    const queuePosition = await getQueuePosition(playerId, platform);
-    const avgWaitTime = await calculateAverageQueueTime(platform, "duo");
+  let friendUsername = interaction.fields
+    .getTextInputValue("duo_partner_username")
+    .trim()
+    .toLowerCase();
 
-    logger.info("✅ Duo queue success", {
-      initiator: interaction.user.tag,
-      partner: friend.user.tag,
-      platform,
-    });
-
+  if (friendUsername.length < 2) {
     return interaction.reply({
-      content: `✅ You and <@${friendId}> have joined the **Duo** queue for **${platform.toUpperCase()}**.\n**Queue Position:** ${queuePosition}\n**Estimated Wait Time:** ${Math.round(
-        avgWaitTime / 60000
-      )} minutes.`,
-      components: [
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId("remove_from_queue")
-            .setLabel("Leave Queue")
-            .setStyle(ButtonStyle.Danger)
-        ),
-      ],
-      flags: 64,
-    });
-  } catch (error) {
-    logger.errorWrapper("handleDuoQueueModal", error, {
-      playerId: interaction.user.id,
-      friendUsername: interaction.fields?.getTextInputValue(
-        "duo_partner_username"
-      ),
-    });
-
-    return interaction.reply({
-      content: "❌ An error occurred while processing your duo queue request.",
+      content: "❌ Please enter at least 2 characters.",
       flags: 64,
     });
   }
+
+  if (!platform) {
+    return interaction.reply({
+      content: "❌ Platform not found. Please try again.",
+      flags: 64,
+    });
+  }
+
+  const passedCooldown = await enforceQueueCooldown(playerId, interaction);
+  if (!passedCooldown) return;
+
+  let friend =
+    interaction.guild.members.cache.find(
+      (m) => m.user.username.toLowerCase() === friendUsername
+    ) ?? null;
+
+  if (!friend) {
+    try {
+      await interaction.guild.members.fetch();
+      friend = interaction.guild.members.cache.find(
+        (m) => m.user.username.toLowerCase() === friendUsername
+      );
+    } catch (err) {
+      logger.warn("⚠️ Failed to fetch guild members for fallback lookup", {
+        error: err.message,
+      });
+    }
+  }
+
+  if (!friend) {
+    return interaction.reply({
+      content: `❌ Could not find a user named **${friendUsername}**.\nMake sure they’re in this server and their username is typed exactly.`,
+      flags: 64,
+    });
+  }
+
+  const friendId = friend.id;
+
+  if (friendId === playerId) {
+    return interaction.reply({
+      content: "❌ You cannot queue with yourself as your duo partner.",
+      flags: 64,
+    });
+  }
+
+  if (friend.user.bot) {
+    return interaction.reply({
+      content: "🤖 You cannot queue with a bot as your partner.",
+      flags: 64,
+    });
+  }
+
+  const isBlacklisted = await db.getAsync(
+    `SELECT id FROM blacklist WHERE id = ?`,
+    [friendId]
+  );
+  if (isBlacklisted) {
+    return interaction.reply({
+      content: `🚫 <@${friendId}> is blacklisted and cannot join the queue.`,
+      flags: 64,
+    });
+  }
+
+  const [initiator, partner] = await Promise.all([
+    getPlayerById(playerId),
+    getPlayerById(friendId),
+  ]);
+
+  if (initiator?.status === "active") {
+    return interaction.reply({
+      content: "You're already in an active match.",
+      flags: 64,
+    });
+  }
+
+  if (partner?.status === "active") {
+    return interaction.reply({
+      content: "Your partner is in an active match.",
+      flags: 64,
+    });
+  }
+
+  if (
+    initiator?.status === "queued" &&
+    initiator.duoPartner &&
+    initiator.duoPartner !== friendId
+  ) {
+    return interaction.reply({
+      content: "You're already queued with someone else as your partner.",
+      flags: 64,
+    });
+  }
+
+  if (
+    partner?.status === "queued" &&
+    partner.duoPartner &&
+    partner.duoPartner !== playerId
+  ) {
+    return interaction.reply({
+      content: "Your partner is already queued with someone else.",
+      flags: 64,
+    });
+  }
+
+  const now = Date.now();
+
+  // ✅ Duo insert/update
+  await Promise.all([
+    db.runAsync(
+      `INSERT INTO players (id, platform, status, duoPartner, queue_entered_at)
+       VALUES (?, ?, 'queued', ?, ?)
+       ON CONFLICT(id) DO UPDATE SET platform = excluded.platform, status = 'queued', duoPartner = excluded.duoPartner, queue_entered_at = excluded.queue_entered_at`,
+      [playerId, platform, friendId, now]
+    ),
+    db.runAsync(
+      `INSERT INTO players (id, platform, status, duoPartner, queue_entered_at)
+       VALUES (?, ?, 'queued', ?, ?)
+       ON CONFLICT(id) DO UPDATE SET platform = excluded.platform, status = 'queued', duoPartner = excluded.duoPartner, queue_entered_at = excluded.queue_entered_at`,
+      [friendId, platform, playerId, now]
+    ),
+  ]);
+
+  await Promise.all([
+    db.runAsync(
+      `INSERT INTO queue_history (playerId, platform, duoPartner, queue_entered_at)
+       VALUES (?, ?, ?, ?)`,
+      [playerId, platform, friendId, now]
+    ),
+    db.runAsync(
+      `INSERT INTO queue_history (playerId, platform, duoPartner, queue_entered_at)
+       VALUES (?, ?, ?, ?)`,
+      [friendId, platform, playerId, now]
+    ),
+  ]);
+
+  const queuePosition = await getQueuePosition(playerId, platform);
+  const avgWaitTime = await calculateAverageQueueTime(platform, "duo");
+
+  logger.info("✅ Duo queue success", {
+    initiator: interaction.user.tag,
+    partner: friend.user.tag,
+    platform,
+  });
+
+  await interaction.reply({
+    content: `✅ You and <@${friendId}> have joined the **Duo** queue for **${platform.toUpperCase()}**.\n**Queue Position:** ${queuePosition}\n**Estimated Wait Time:** ${Math.round(
+      avgWaitTime / 60000
+    )} minutes.`,
+    components: [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("remove_from_queue")
+          .setLabel("Leave Queue")
+          .setStyle(ButtonStyle.Danger)
+      ),
+    ],
+    flags: 64,
+  });
+
+  // 📊 Defer stat/event tracking
+  processDuoQueuePostActions(playerId, friendId, platform);
 }
 
 async function handleTrioQueue(interaction) {
@@ -424,8 +428,20 @@ async function handleTrioQueue(interaction) {
     }
 
     if (player?.status === "queued") {
+      let queueType = "Solo";
+      if (player.duoPartner) queueType = "Duo";
+      if (player.trioPartner1 && player.trioPartner2) queueType = "Trio";
+
       return interaction.reply({
-        content: `You're already queued. Please leave the queue before changing status.`,
+        content: `You're already queued as **${queueType}** on **${player.platform}**.\nPlease leave the queue before changing status.`,
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId("remove_from_queue")
+              .setLabel("Leave Queue")
+              .setStyle(ButtonStyle.Danger)
+          ),
+        ],
         flags: 64,
       });
     }
@@ -467,6 +483,32 @@ async function handleTrioQueue(interaction) {
   }
 }
 
+async function postProcessTrioQueue(playerIds, platform) {
+  try {
+    await updateTrioPartnerStatistics(playerIds);
+    await incrementBotStatistic("total_queue_entries", playerIds.length);
+    await incrementBotStatistic(`queue_entries_${platform}`, playerIds.length);
+    await incrementBotStatistic("queue_entries_trio", playerIds.length); // ✅ fix here
+
+    for (const id of playerIds) {
+      await updateQueueStatistics(id, platform, "trio"); // ✅ one per player, increments by 1
+      await trackUniqueUser(id);
+
+      const others = playerIds.filter((x) => x !== id);
+      await evaluateEventProgress(id, "queue_entries", 1);
+      await evaluateEventProgress(id, "queue_trio", 1);
+      await evaluateEventProgress(id, "queue_with_user", {
+        partnerIds: others,
+      });
+    }
+  } catch (err) {
+    logger.errorWrapper("postProcessTrioQueue", err, {
+      playerIds,
+      platform,
+    });
+  }
+}
+
 async function handleTrioQueueModal(interaction) {
   const playerId = interaction.user.id;
   const platform = playerPlatformSelection[playerId];
@@ -482,7 +524,6 @@ async function handleTrioQueueModal(interaction) {
       .trim()
       .toLowerCase();
 
-    // 🛑 Insert this right here:
     if (
       partner1Username === partner2Username ||
       [partner1Username, partner2Username].includes(
@@ -514,7 +555,6 @@ async function handleTrioQueueModal(interaction) {
     );
 
     const partnerIds = [member1?.id, member2?.id];
-
     if (!member1 || !member2 || partnerIds.includes(undefined)) {
       return interaction.reply({
         content: `❌ Could not find one or both teammates. Make sure usernames are correct and they are in the server.`,
@@ -545,7 +585,6 @@ async function handleTrioQueueModal(interaction) {
 
     const allIds = [playerId, ...partnerIds];
     const players = await Promise.all(allIds.map((id) => getPlayerById(id)));
-
     for (const [i, p] of players.entries()) {
       if (p?.status === "active") {
         return interaction.reply({
@@ -554,7 +593,7 @@ async function handleTrioQueueModal(interaction) {
         });
       }
     }
-    const trioId = crypto.randomUUID();
+
     const existingTrio = await db.getAsync(
       `SELECT 1 FROM trio_partner_groups 
        WHERE active = 1 AND 
@@ -572,6 +611,7 @@ async function handleTrioQueueModal(interaction) {
       });
     }
 
+    const trioId = crypto.randomUUID();
     await db.runAsync(
       `INSERT INTO trio_partner_groups 
        (trio_id, player1_id, player2_id, player3_id, created_at, active)
@@ -592,32 +632,10 @@ async function handleTrioQueueModal(interaction) {
          VALUES (?, ?, ?)`,
         [id, platform, now]
       );
-
-      await db.runAsync(
-        `INSERT INTO player_statistics (id, queue_entries_trio)
-         VALUES (?, 1)
-         ON CONFLICT(id) DO UPDATE SET queue_entries_trio = queue_entries_trio + 1`,
-        [id]
-      );
-
-      await updateQueueStatistics(id, platform, "trio");
-
-      await trackUniqueUser(id);
     }
-    await updateTrioPartnerStatistics(allIds);
-    await incrementBotStatistic("total_queue_entries", 3);
-    await incrementBotStatistic(`queue_entries_${platform}`, 3);
-    await incrementBotStatistic("queue_entries_trio", 1);
 
-    for (const id of allIds) {
-      const others = allIds.filter((x) => x !== id);
-
-      await evaluateEventProgress(id, "queue_entries", 1);
-      await evaluateEventProgress(id, "queue_trio", 1);
-      await evaluateEventProgress(id, "queue_with_user", {
-        partnerIds: others,
-      });
-    }
+    // ✅ Run post-processing separately (non-blocking)
+    postProcessTrioQueue(allIds, platform);
 
     const queuePosition = await getQueuePosition(playerId, platform);
     const avgWaitTime = await calculateAverageQueueTime(platform, "trio");

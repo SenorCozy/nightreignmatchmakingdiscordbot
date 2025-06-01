@@ -1,4 +1,3 @@
-// commands/currency.js
 const { SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
 const db = require("../database");
 const logger = require("../logger");
@@ -21,7 +20,15 @@ const MOD_ROLE_IDS_AUDIT = [
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("currency")
-    .setDescription("Admin command to manage player currency.")
+    .setDescription("View or manage player currency.")
+    .addSubcommand((sub) =>
+      sub
+        .setName("balance")
+        .setDescription("View your own or another user's currency balance.")
+        .addUserOption((opt) =>
+          opt.setName("user").setDescription("Player (optional)")
+        )
+    )
     .addSubcommand((sub) =>
       sub
         .setName("add")
@@ -79,8 +86,9 @@ module.exports = {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
-    const user = interaction.options.getUser("user");
+    const user = interaction.options.getUser("user") || interaction.user; // defaults to self
     const page = interaction.options.getInteger("page") || 1;
+
     const member = await interaction.guild.members.fetch(interaction.user.id);
     const isModForAddRemove = member.roles.cache.some((r) =>
       MOD_ROLE_IDS_ADD_REMOVE.includes(r.id)
@@ -89,6 +97,10 @@ module.exports = {
       MOD_ROLE_IDS_AUDIT.includes(r.id)
     );
 
+    const playerId = user.id;
+    const now = Date.now();
+
+    // 🚫 Role Restrictions
     if ((sub === "add" || sub === "remove") && !isModForAddRemove) {
       return interaction.reply({
         content: "🚫 You do not have permission to modify currency.",
@@ -103,9 +115,21 @@ module.exports = {
       });
     }
 
-    const playerId = user.id;
-    const now = Date.now();
+    // 👤 View Balance (Public)
+    if (sub === "balance") {
+      const row = await db.getAsync(
+        `SELECT balance FROM player_currency WHERE player_id = ?`,
+        [playerId]
+      );
+      const balance = row?.balance || 0;
 
+      return interaction.reply({
+        content: `💰 **${user.username}'s Balance:** ${balance} 🪙`,
+        flags: 64,
+      });
+    }
+
+    // ➕ Add / ➖ Remove Currency (Mods Only)
     if (sub === "add" || sub === "remove") {
       const amount = interaction.options.getInteger("amount");
       const reason = interaction.options.getString("reason");
@@ -114,18 +138,24 @@ module.exports = {
 
       await db.runAsync(
         `INSERT INTO player_currency (player_id, balance)
-           VALUES (?, ?)
-           ON CONFLICT(player_id) DO UPDATE SET balance = balance + ?`,
+         VALUES (?, ?)
+         ON CONFLICT(player_id) DO UPDATE SET balance = balance + ?`,
         [playerId, finalAmount, finalAmount]
       );
 
       await db.runAsync(
         `INSERT INTO currency_audit (player_id, amount_changed, source, source_id, modified_by, modified_at, reason)
-           VALUES (?, ?, 'manual', NULL, ?, ?, ?)`,
+         VALUES (?, ?, 'manual', NULL, ?, ?, ?)`,
         [playerId, finalAmount, interaction.user.id, now, reason]
       );
 
-      await checkCurrencyAchievements(playerId, db);
+      setImmediate(() => {
+        checkCurrencyAchievements(playerId, db).catch((err) => {
+          logger.errorWrapper("Currency achievement check failed", err, {
+            playerId,
+          });
+        });
+      });
 
       return interaction.reply({
         content: `✅ ${sub === "add" ? "Added" : "Removed"} ${Math.abs(
@@ -135,6 +165,7 @@ module.exports = {
       });
     }
 
+    // 📜 Audit Trail (Mods Only)
     if (sub === "audit") {
       const pageSize = 10;
       const offset = (page - 1) * pageSize;

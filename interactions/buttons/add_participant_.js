@@ -6,7 +6,7 @@ const {
 } = require("discord.js");
 
 module.exports = {
-  customId: /^add_participant_/,
+  customIdregex: /^add_participant_/,
   async execute(interaction) {
     const submissionId = interaction.customId.split("_").slice(-1)[0];
 

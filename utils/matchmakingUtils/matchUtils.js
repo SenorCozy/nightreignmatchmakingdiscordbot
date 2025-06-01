@@ -81,7 +81,7 @@ async function cleanupMatch({
   try {
     const wasAutoClosed = closureReason.toLowerCase().includes("inactivity");
 
-    // Cancel collectors
+    // Cancel all collectors
     endReadyCheck(thread.id);
     matchEndCollectors.get(thread.id)?.stop("cleanup");
     matchEndCollectors.delete(thread.id);
@@ -96,12 +96,13 @@ async function cleanupMatch({
     }
 
     const matchInfo = await db.getAsync(
-      `SELECT match_id, created_at, platform FROM matches WHERE thread_id = ?`,
+      `SELECT match_id, created_at, platform, formation_type FROM matches WHERE thread_id = ?`,
       [thread.id]
     );
     const match_id = matchInfo?.match_id;
     const createdAt = matchInfo?.created_at;
     const platform = matchInfo?.platform || "unknown";
+    const formation = matchInfo?.formation_type;
 
     if (!match_id || !createdAt) {
       logger.warn("Missing match_id or created_at for thread", {
@@ -112,6 +113,7 @@ async function cleanupMatch({
 
     const now = Date.now();
     const matchDuration = now - new Date(createdAt).getTime();
+
     await awardMatchCompletionPoints(
       match_id,
       new Date(createdAt).getTime(),
@@ -160,29 +162,9 @@ async function cleanupMatch({
          VALUES (?, ?, ?, 'match_cleanup', ?, ?, ?)`,
         [match_id, thread.id, playerId, now, closureReason, finalStatus]
       );
-
-      await ensurePlayerStatRow(playerId);
-
-      try {
-        await trackLongestMatchTime(playerId, matchDuration);
-        await addToPlayerMatchTime(playerId, matchDuration);
-        await incrementMatchesCompleted(
-          playerId,
-          wasAutoClosed ? 0 : matchDuration,
-          match_id,
-          wasAutoClosed ? 1 : null
-        );
-      } catch (err) {
-        logger.warn("📉 Stat update failed", {
-          playerId,
-          matchDuration,
-          error: err.stack || err.message,
-        });
-      }
     }
 
     logger.info(`📝 Generating transcript for match ${match_id}...`);
-
     await generateMatchTranscript(
       thread,
       closedByUserOrBot,
@@ -191,90 +173,108 @@ async function cleanupMatch({
       finalPlayers
     );
 
-    await awardHighTurnoverAchievements(match_id);
-
-    // 🎯 Evaluate event progress for completion-based goals
-    for (const playerId of finalPlayers) {
-      const metadata = {
-        matchId: match_id,
-        matchDuration,
-        platform,
-        initialPlayerIds: initialPlayers,
-        finalPlayerIds: finalPlayers,
-      };
-
-      await Promise.all([
-        evaluateEventProgress(playerId, "complete_match", 1, metadata),
-        evaluateEventProgress(playerId, "matches_completed", 1, metadata),
-        evaluateEventProgress(playerId, "complete_with_user", 1, metadata),
-        evaluateEventProgress(
-          playerId,
-          "complete_long_match",
-          matchDuration,
-          metadata
-        ),
-        evaluateEventProgress(
-          playerId,
-          "complete_1_hour_match",
-          matchDuration,
-          metadata
-        ),
-      ]);
-
-      if (matchInfo?.formation_type === "duo") {
-        await evaluateEventProgress(
-          playerId,
-          "matches_completed_duo",
-          1,
-          metadata
-        );
-      }
-
-      if (matchInfo?.formation_type === "trio") {
-        await evaluateEventProgress(
-          playerId,
-          "matches_completed_trio",
-          1,
-          metadata
-        );
-      }
-      await check24hMatchCompletionStreak(playerId);
-      await checkDailyMatchStreakAchievements(playerId);
-    }
-
     delete global.initialPlayersByMatch?.[thread.id];
+
+    // ⏭ Defer all stat, achievement, and event logic
+    setImmediate(async () => {
+      try {
+        for (const { playerId } of playerStatuses) {
+          try {
+            await ensurePlayerStatRow(playerId);
+            await trackLongestMatchTime(playerId, matchDuration);
+            await addToPlayerMatchTime(playerId, matchDuration);
+            await incrementMatchesCompleted(
+              playerId,
+              wasAutoClosed ? 0 : matchDuration,
+              match_id,
+              wasAutoClosed ? 1 : null
+            );
+          } catch (err) {
+            logger.warn("📉 Stat update failed", {
+              playerId,
+              matchDuration,
+              error: err.stack || err.message,
+            });
+          }
+        }
+
+        await awardHighTurnoverAchievements(match_id);
+
+        for (const playerId of finalPlayers) {
+          const metadata = {
+            matchId: match_id,
+            matchDuration,
+            platform,
+            initialPlayerIds: initialPlayers,
+            finalPlayerIds: finalPlayers,
+          };
+
+          await Promise.all([
+            evaluateEventProgress(playerId, "complete_match", 1, metadata),
+            evaluateEventProgress(playerId, "matches_completed", 1, metadata),
+            evaluateEventProgress(playerId, "complete_with_user", 1, metadata),
+            evaluateEventProgress(
+              playerId,
+              "complete_long_match",
+              matchDuration,
+              metadata
+            ),
+            evaluateEventProgress(
+              playerId,
+              "complete_1_hour_match",
+              matchDuration,
+              metadata
+            ),
+          ]);
+
+          if (formation === "duo") {
+            await evaluateEventProgress(
+              playerId,
+              "matches_completed_duo",
+              1,
+              metadata
+            );
+          }
+
+          if (formation === "trio") {
+            await evaluateEventProgress(
+              playerId,
+              "matches_completed_trio",
+              1,
+              metadata
+            );
+          }
+
+          await check24hMatchCompletionStreak(playerId);
+          await checkDailyMatchStreakAchievements(playerId);
+        }
+
+        await Promise.all([
+          addToTotalMatchTime(matchDuration),
+          updateGlobalLongestMatch(matchDuration),
+          addToPlatformMatchTime(platform, matchDuration),
+          updatePlatformLongestMatchTime(platform, matchDuration),
+          incrementPlatformMatchCount(platform),
+        ]);
+      } catch (err) {
+        logger.errorWrapper("Deferred post-cleanup task failed", err);
+      }
+    });
 
     await db.runAsync(`DELETE FROM match_players WHERE match_id = ?`, [
       match_id,
     ]);
-
     await db.runAsync(
       `DELETE FROM players WHERE id IN (${playerStatuses
         .map(() => "?")
         .join(",")})`,
       playerStatuses.map((p) => p.playerId)
     );
-
     await db.runAsync(
       `UPDATE matches SET closed_at = ?, closed_by = ?, closure_reason = ? WHERE match_id = ?`,
       [now, closedByUserOrBot.id || "system", closureReason, match_id]
     );
-
     await db.runAsync(`DELETE FROM channels WHERE threadId = ?`, [thread.id]);
-
-    try {
-      await Promise.all([
-        addToTotalMatchTime(matchDuration),
-        updateGlobalLongestMatch(matchDuration),
-        addToPlatformMatchTime(platform, matchDuration),
-        updatePlatformLongestMatchTime(platform, matchDuration),
-        incrementPlatformMatchCount(platform),
-      ]);
-    } catch (err) {
-      logger.warn("⚠️ Bot/platform stat update failed in cleanupMatch", {
-        error: err.message,
-      });
-    }
 
     try {
       await thread.delete("Cleaning up match");

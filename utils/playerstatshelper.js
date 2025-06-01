@@ -1,15 +1,15 @@
 const db = require("../database");
 const logger = require("../logger");
 
-const { matchesPlayedAchievements } = require("../data/achievements");
-
 const {
   unlockStatThresholdAchievements,
+  matchesPlayedAchievements,
 } = require("../utils/achievementHelpers");
 
 const {
   unlockAchievementIfNotEarned,
   unlockMatchDurationAchievementThreshold,
+  checkPlatformDiversity,
 } = require("./achievementHelpers");
 
 async function incrementPlatformUsage(playerId, platform) {
@@ -31,7 +31,7 @@ async function incrementPlatformUsage(playerId, platform) {
     logger.info(`✅ Platform usage updated for ${playerId} on ${platform}`);
 
     // 🎯 Check for 'platforms_all' achievement
-    await unlockAchievementIfNotEarned(playerId, "platforms_all");
+    await checkPlatformDiversity(playerId);
   } catch (err) {
     logger.errorWrapper("incrementPlatformUsage failed", err, {
       playerId,

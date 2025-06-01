@@ -10,8 +10,8 @@ const { evaluateEventProgress } = require("../../utils/eventUtils");
 const {
   unlockStatThresholdAchievements,
   unlockAchievementIfNotEarned,
+  messageAchievements,
 } = require("../../utils/achievementHelpers");
-const { messageAchievements } = require("../../data/achievements");
 
 const lastActivityCache = new Map(); // threadId -> timestamp
 const THROTTLE_INTERVAL = 2 * 60 * 1000; // 2 minutes
@@ -43,7 +43,7 @@ module.exports = {
         `
         SELECT * FROM events 
         WHERE active = 1 
-          AND goal_type = 'submission' 
+          AND goal_type = 'manual_submission' 
           AND start_time <= ? AND end_time >= ?
         ORDER BY start_time DESC 
         LIMIT 1
@@ -151,6 +151,7 @@ module.exports = {
         .setFooter({ text: `Submission ID: ${submissionId}` });
 
       if (attachment) embed.setImage(attachment);
+      logger.info("Submission attachments:", [...message.attachments.values()]);
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -315,7 +316,6 @@ module.exports = {
     // ✅ Send single warning message if any removals occurred
     if (unauthorizedMentions.length > 0) {
       const userId = message.author.id;
-      await unlockAchievementIfNotEarned(userId, "mention_blocked");
 
       // Track strikes per user
       const strikes = incrementMentionStrike(userId);
@@ -341,6 +341,18 @@ module.exports = {
             error: err.message,
           });
         });
+      try {
+        await unlockAchievementIfNotEarned(userId, "mention_blocked");
+      } catch (err) {
+        logger.errorWrapper(
+          "Failed to unlock 'mention_blocked' achievement",
+          err,
+          {
+            userId,
+            threadId,
+          }
+        );
+      }
 
       if (strikes === 3 && MENTION_ABUSE_ROLE_ID) {
         logger.warn("🚨 User hit mention abuse threshold", {

@@ -20,8 +20,8 @@ const { evaluateEventProgress } = require("../utils/eventUtils");
 const {
   unlockAchievementIfNotEarned,
   unlockStatThresholdAchievements,
+  readyCheckAchievements,
 } = require("../utils/achievementHelpers");
-const { readyCheckAchievements } = require("../data/achievements");
 
 async function initiateReadyCheck(thread, players) {
   try {

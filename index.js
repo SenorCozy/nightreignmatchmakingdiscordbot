@@ -3,6 +3,9 @@ const db = require("./database.js");
 const fs = require("fs");
 const path = require("path");
 const logger = require("./logger");
+require("./logFlusher");
+const FormData = require("form-data");
+
 const { setupRecurringEventHandler } = require("./utils/eventUtils");
 
 const {

@@ -21,6 +21,16 @@ module.exports = {
         )
         .addStringOption((opt) =>
           opt
+            .setName("event_type")
+            .setDescription("Submission or progress-based?")
+            .setRequired(true)
+            .addChoices(
+              { name: "Progress (auto-tracked)", value: "progress" },
+              { name: "Submission (manual)", value: "submission" }
+            )
+        )
+        .addStringOption((opt) =>
+          opt
             .setName("goal_type")
             .setDescription("What type of goal this event tracks.")
             .setRequired(true)
@@ -45,15 +55,7 @@ module.exports = {
             .setRequired(true)
         )
         // ✅ Optional options come after required ones
-        .addStringOption((opt) =>
-          opt
-            .setName("event_type")
-            .setDescription("Submission or progress-based?")
-            .addChoices(
-              { name: "Progress (auto-tracked)", value: "progress" },
-              { name: "Submission (manual)", value: "submission" }
-            )
-        )
+
         .addStringOption((opt) =>
           opt.setName("description").setDescription("Optional description")
         )

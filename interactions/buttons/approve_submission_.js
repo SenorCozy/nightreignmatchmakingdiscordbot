@@ -14,7 +14,7 @@ const MODERATOR_ROLE_IDS = [
 ].filter(Boolean);
 
 module.exports = {
-  customId: /^approve_submission_/,
+  customIdregex: /^approve_submission_/,
   async execute(interaction) {
     try {
       const member = await interaction.guild.members.fetch(interaction.user.id);
@@ -91,11 +91,23 @@ module.exports = {
               `Approved submission ${submissionId}`,
             ]
           );
-          await checkCurrencyAchievements(player_id, db);
 
-          await evaluateEventProgress(player_id, "submission", 1, {
-            event_id: submission.event_id,
-            submission_id: submission.submission_id,
+          // ⏱ Defer achievements + event progress
+          setImmediate(() => {
+            checkCurrencyAchievements(player_id, db).catch((err) =>
+              logger.errorWrapper("Currency achievement check failed", err, {
+                playerId: player_id,
+              })
+            );
+
+            evaluateEventProgress(player_id, "submission", 1, {
+              event_id: submission.event_id,
+              submission_id: submission.submission_id,
+            }).catch((err) =>
+              logger.errorWrapper("Event progress check failed", err, {
+                playerId: player_id,
+              })
+            );
           });
 
           logger.info("✅ Group submission reward granted", {

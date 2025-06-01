@@ -9,7 +9,7 @@ const MODERATOR_ROLE_IDS = [
 ].filter(Boolean);
 
 module.exports = {
-  customId: /^reject_submission_/,
+  customIdregex: /^reject_submission_/,
   async execute(interaction) {
     try {
       const member = await interaction.guild.members.fetch(interaction.user.id);

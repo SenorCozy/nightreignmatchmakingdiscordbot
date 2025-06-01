@@ -3,9 +3,8 @@ const logger = require("../../logger");
 const { evaluateEventProgress } = require("../../utils/eventUtils");
 const {
   unlockStatThresholdAchievements,
+  vcTimeAchievements,
 } = require("../../utils/achievementHelpers");
-
-const { vcTimeAchievements } = require("../../data/achievements");
 
 const activeVCJoins = new Map(); // key: userId_channelId, value: join timestamp
 

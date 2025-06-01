@@ -4,8 +4,10 @@ const {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  AttachmentBuilder,
 } = require("discord.js");
 
+const path = require("path");
 const logger = require("../logger");
 
 module.exports = {
@@ -15,7 +17,7 @@ module.exports = {
 
   async execute(interaction) {
     try {
-      await interaction.deferReply({});
+      await interaction.deferReply();
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -32,15 +34,30 @@ module.exports = {
           .setStyle(ButtonStyle.Secondary)
       );
 
+      const imagePath = path.join(__dirname, "../public/queue_guide.png");
+      const file = new AttachmentBuilder(imagePath);
+
       const embed = new EmbedBuilder()
         .setTitle("🎮 Welcome to the Nightreign Matchmaking!")
-        .setDescription("Click the button below to join the queue.")
+        .setDescription(
+          `**How it works**\n\n` +
+            `**1.** Click **Enter Queue** below — you'll be prompted to select a platform.\n\n` +
+            `**2.** Choose how to queue:\n` +
+            `  • **Solo** — matched with two random players\n` +
+            `  • **Duo** — enter one friend's Discord username\n` +
+            `  • **Trio** — enter two Discord usernames for a full premade\n\n` +
+            `**3.** You'll be placed into a private match thread to coordinate.\n\n` +
+            `**4.** Your friends **must be in this server** to be added to queue.\n\n` +
+            `**5.** If you leave while in a duo/trio, your teammates will remain in queue unless they leave too.\n\n` +
+            `📈 **Progression is tracked and rewarded by using this system!**`
+        )
         .setColor("#7289DA")
-        .setThumbnail("https://your-image-link.com");
+        .setImage("attachment://queue_guide.png");
 
       await interaction.editReply({
         embeds: [embed],
         components: [row],
+        files: [file],
       });
     } catch (err) {
       logger.errorWrapper("❌ Error in /start command", err, {

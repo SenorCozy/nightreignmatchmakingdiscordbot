@@ -18,6 +18,9 @@ const checkAuth = require("./middleware/checkAuth");
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((obj, done) => done(null, obj));
 
+// 🌐 Static Files
+app.use(express.static(path.join(__dirname, "public")));
+
 // 🔐 Discord Strategy Setup
 passport.use(
   new DiscordStrategy(

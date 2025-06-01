@@ -100,8 +100,10 @@ module.exports = {
       await db.run(`INSERT OR IGNORE INTO player_statistics (id) VALUES (?)`, [
         playerId,
       ]);
-      await incrementMatchesPlayed(playerId);
-      await trackQueueLeaveTimestamp(playerId);
+      setImmediate(() => {
+        incrementMatchesPlayed(playerId);
+        trackQueueLeaveTimestamp(playerId);
+      });
 
       try {
         await thread.members.add(playerId);

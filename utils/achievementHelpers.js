@@ -1,60 +1,104 @@
-module.exports = {
-  // Common stat helpers
-  statThresholdAchievement,
-  uniquePartnersAchievement,
-  repeatPartnerAchievement,
-  mvpGivenAchievement,
-  mvpReceivedAchievement,
-  eventCompletionAchievement,
-  matchCompletionPointAchievement,
-  matchCompletionStreakAchievement,
-  dailyMatchStreakAchievement,
-  matchDurationAchievement,
-  achievementCountAchievement,
-  currencyThresholdAchievement,
-
-  vcTimeAchievement,
-  messageCountAchievement,
-  platformUsageAchievement,
-
-  samePartnerCountAchievement,
-
-  storePurchaseAchievement,
-
-  // Custom logic helpers
-  mentionChastisedAchievement,
-  dualMvpAchievement,
-  mvpCooldownAttemptAchievement,
-  currencySpentAchievement,
-  currencyZeroedAchievement,
-  storeCompleteAchievement,
-
-  botMentionAchievement,
-  formationDiversityAchievement,
-  playersInMatchAchievement,
-  unlockAchievementIfNotEarned,
-  awardHighTurnoverAchievements,
-  checkRepeatPartnerAchievements,
-  check24hMatchCompletionStreak,
-  checkReadyCheckMilestones,
-  trackNewUniquePartners,
-  checkEventCompletionAchievements,
-  unlockStatThresholdAchievements,
-  unlockUniquePartnerAchievements,
-  checkMvpGivenAchievements,
-  checkMvpReceivedAchievements,
-  checkSelflessMvpAchievement,
-  checkMatchCompletionPointAchievements,
-  checkCurrencyAchievements,
-  checkDailyMatchStreakAchievements,
-  unlockMatchDurationAchievementThreshold,
-};
 const { EmbedBuilder } = require("discord.js");
 const db = require("../database");
 const logger = require("../logger");
 const { logCurrencyChange } = require("./logCurrencyChange");
 const QUEUE_ALERT_CHANNEL = process.env.QUEUE_ALERT_CHANNEL;
+function statThresholdAchievement({
+  id,
+  name,
+  description,
+  reward,
+  statKey,
+  threshold,
+}) {
+  return {
+    id,
+    name,
+    description,
+    reward,
+    statKey,
+    threshold,
+    check: async (playerId, db) => {
+      const row = await db.getAsync(
+        `SELECT ${statKey} FROM player_statistics WHERE id = ?`,
+        [playerId]
+      );
+      return row?.[statKey] >= threshold;
+    },
+  };
+}
 
+function vcTimeAchievement({ id, name, description, reward, threshold }) {
+  return {
+    id,
+    name,
+    description,
+    reward,
+    check: async (playerId, db) => {
+      const row = await db.getAsync(
+        `SELECT vc_time FROM player_statistics WHERE id = ?`,
+        [playerId]
+      );
+      return row?.vc_time >= threshold;
+    },
+  };
+}
+
+function messageCountAchievement({ id, name, description, reward, threshold }) {
+  return {
+    id,
+    name,
+    description,
+    reward,
+    statKey: "messages_sent",
+    threshold,
+    check: async (playerId, db) => {
+      const row = await db.getAsync(
+        `SELECT messages_sent FROM player_statistics WHERE id = ?`,
+        [playerId]
+      );
+      return row?.messages_sent >= threshold;
+    },
+  };
+}
+
+function mentionChastisedAchievement({ id, name, description, reward }) {
+  return {
+    id,
+    name,
+    description,
+    reward,
+    check: async (playerId, db) => {
+      const row = await db.getAsync(
+        `SELECT COUNT(*) AS count FROM player_mention_violations WHERE player_id = ?`,
+        [playerId]
+      );
+      return (row?.count || 0) >= 1;
+    },
+  };
+}
+
+function uniquePartnersAchievement({
+  id,
+  name,
+  description,
+  reward,
+  threshold,
+}) {
+  return {
+    id,
+    name,
+    description,
+    reward,
+    check: async (playerId, db) => {
+      const row = await db.getAsync(
+        `SELECT COUNT(DISTINCT partner_id) AS count FROM player_partners WHERE player_id = ?`,
+        [playerId]
+      );
+      return row?.count >= threshold;
+    },
+  };
+}
 function repeatPartnerAchievement({
   id,
   name,
@@ -88,28 +132,6 @@ function eventCompletionAchievement({
     check: async (playerId, db) => {
       const row = await db.getAsync(
         `SELECT COUNT(*) AS count FROM event_progress WHERE player_id = ? AND completed = 1`,
-        [playerId]
-      );
-      return row?.count >= threshold;
-    },
-  };
-}
-
-function uniquePartnersAchievement({
-  id,
-  name,
-  description,
-  reward,
-  threshold,
-}) {
-  return {
-    id,
-    name,
-    description,
-    reward,
-    check: async (playerId, db) => {
-      const row = await db.getAsync(
-        `SELECT COUNT(DISTINCT partner_id) AS count FROM player_partners WHERE player_id = ?`,
         [playerId]
       );
       return row?.count >= threshold;
@@ -205,10 +227,10 @@ function dailyMatchStreakAchievement({ id, name, description, reward, days }) {
     check: async (playerId, db) => {
       const results = await db.allAsync(
         `SELECT DISTINCT DATE(timestamp / 1000.0, 'unixepoch', 'localtime') AS play_date
-               FROM match_completion_awards
-               WHERE player_id = ?
-               ORDER BY play_date DESC
-               LIMIT ?`,
+                 FROM match_completion_awards
+                 WHERE player_id = ?
+                 ORDER BY play_date DESC
+                 LIMIT ?`,
         [playerId, days]
       );
 
@@ -294,286 +316,6 @@ function currencyThresholdAchievement({
   };
 }
 
-async function unlockMetaAchievementThreshold(playerId, db) {
-  const row = await db.getAsync(
-    `SELECT COUNT(*) AS count FROM player_achievements WHERE player_id = ?`,
-    [playerId]
-  );
-
-  const unlockedCount = row?.count || 0;
-
-  const sorted = metaAchievements.sort((a, b) => a.threshold - b.threshold);
-
-  for (const achievement of sorted) {
-    const alreadyUnlocked = await db.getAsync(
-      `SELECT 1 FROM player_achievements WHERE player_id = ? AND achievement_id = ?`,
-      [playerId, achievement.id]
-    );
-    if (alreadyUnlocked) continue;
-
-    // Handle special case for 'achievements_all'
-    const totalAchievements =
-      achievement.id === "achievements_all"
-        ? (await db.getAsync(`SELECT COUNT(*) AS total FROM achievements`))
-            .total
-        : achievement.threshold;
-
-    if (unlockedCount >= totalAchievements) {
-      await unlockAchievementIfNotEarned(playerId, achievement.id);
-      break; // ✅ Only unlock one at a time
-    }
-  }
-}
-
-async function unlockMatchDurationAchievementThreshold(
-  playerId,
-  newDuration,
-  db
-) {
-  // Sort by ascending threshold
-  const sorted = matchDurationAchievements.sort(
-    (a, b) => a.check.threshold - b.check.threshold
-  );
-
-  for (const achievement of sorted) {
-    const alreadyUnlocked = await db.getAsync(
-      `SELECT 1 FROM player_achievements WHERE player_id = ? AND achievement_id = ?`,
-      [playerId, achievement.id]
-    );
-    if (alreadyUnlocked) continue;
-
-    // Check if they *just reached* this threshold
-    if (newDuration >= achievement.check.threshold) {
-      await unlockAchievementIfNotEarned(playerId, achievement.id, db);
-      break; // ✅ Only unlock one per update
-    }
-  }
-}
-
-async function checkDailyMatchStreakAchievements(playerId) {
-  try {
-    for (const achievement of dailyMatchStreakAchievements) {
-      const passed = await achievement.check(playerId, db);
-      if (passed) {
-        await unlockAchievementIfNotEarned(playerId, achievement.id);
-      }
-    }
-  } catch (err) {
-    logger.warn("⚠️ Failed to check daily match streak achievements", {
-      playerId,
-      error: err.message,
-    });
-  }
-}
-
-async function checkCurrencyAchievements(playerId, db) {
-  try {
-    const row = await db.getAsync(
-      `SELECT balance FROM player_currency WHERE player_id = ?`,
-      [playerId]
-    );
-
-    const balance = row?.balance || 0;
-
-    for (const achievement of currencyAchievements) {
-      if (balance >= achievement.threshold) {
-        await unlockAchievementIfNotEarned(playerId, achievement.id);
-      }
-    }
-  } catch (err) {
-    console.error("❌ Failed to check currency achievements:", err);
-  }
-}
-
-async function checkMatchCompletionPointAchievements(playerId, db) {
-  try {
-    const row = await db.getAsync(
-      `SELECT SUM(points) AS total FROM match_completion_awards WHERE player_id = ?`,
-      [playerId]
-    );
-
-    const total = row?.total || 0;
-
-    for (const achievement of matchCompletionPointAchievements) {
-      if (await achievement.check(playerId, db)) {
-        await unlockAchievementIfNotEarned(playerId, achievement.id);
-      }
-    }
-  } catch (err) {
-    console.error("❌ Failed to check match completion achievements:", err);
-  }
-}
-
-async function checkMvpGivenAchievements(playerId) {
-  try {
-    const row = await db.getAsync(
-      `SELECT COUNT(*) as count FROM mvp_awards WHERE giver_id = ?`,
-      [playerId]
-    );
-
-    const givenCount = row?.count || 0;
-    await unlockThresholdAchievementsFromValue(
-      playerId,
-      givenCount,
-      mvpGivenAchievements
-    );
-  } catch (err) {
-    logger.error("❌ Failed to check/unlock MVP given achievements", {
-      playerId,
-      error: err,
-    });
-  }
-}
-
-async function checkMvpReceivedAchievements(playerId) {
-  try {
-    const row = await db.getAsync(
-      `SELECT COUNT(*) as count FROM mvp_awards WHERE receiver_id = ?`,
-      [playerId]
-    );
-
-    const receivedCount = row?.count || 0;
-    await unlockThresholdAchievementsFromValue(
-      playerId,
-      receivedCount,
-      mvpReceivedAchievements
-    );
-  } catch (err) {
-    logger.error("❌ Failed to check/unlock MVP received achievements", {
-      playerId,
-      error: err,
-    });
-  }
-}
-
-async function unlockRepeatPartnerAchievements(playerId, repeatCount) {
-  const unlockable = repeatPartnerAchievements.filter(
-    (a) => repeatCount >= a.threshold
-  );
-
-  for (const achievement of unlockable) {
-    try {
-      await unlockAchievementIfNotEarned(playerId, achievement.id);
-    } catch (err) {
-      logger.warn("⚠️ Failed to unlock repeat partner achievement", {
-        playerId,
-        achievementId: achievement.id,
-        error: err.message,
-      });
-    }
-  }
-}
-async function unlockThresholdAchievementsFromValue(
-  playerId,
-  value,
-  achievements
-) {
-  const unlocks = achievements.filter((a) => value >= a.threshold);
-  if (value <= 0) return;
-
-  for (const a of unlocks) {
-    await unlockAchievementIfNotEarned(playerId, a.id);
-  }
-}
-
-async function unlockStatThresholdAchievements(
-  playerId,
-  statKey,
-  achievements
-) {
-  const row = await db.getAsync(
-    `SELECT ${statKey} FROM player_statistics WHERE id = ?`,
-    [playerId]
-  );
-  const value = row?.[statKey] || 0;
-
-  const unlocks = achievements.filter((a) => value >= a.threshold);
-  await Promise.all(
-    unlocks.map((a) => unlockAchievementIfNotEarned(playerId, a.id))
-  );
-}
-
-async function checkEventCompletionAchievements(playerId) {
-  try {
-    const row = await db.getAsync(
-      `SELECT COUNT(*) AS count FROM event_progress WHERE player_id = ? AND completed = 1`,
-      [playerId]
-    );
-
-    const completedCount = row?.count || 0;
-
-    await unlockThresholdAchievementsFromValue(
-      playerId,
-      completedCount,
-      eventCompletionAchievements
-    );
-  } catch (err) {
-    logger.error("❌ Failed to check/unlock event completion achievements", {
-      playerId,
-      error: err,
-    });
-  }
-}
-
-function statThresholdAchievement({
-  id,
-  name,
-  description,
-  reward,
-  statKey,
-  threshold,
-}) {
-  return {
-    id,
-    name,
-    description,
-    reward,
-    statKey,
-    threshold,
-    check: async (playerId, db) => {
-      const row = await db.getAsync(
-        `SELECT ${statKey} FROM player_statistics WHERE id = ?`,
-        [playerId]
-      );
-      return row?.[statKey] >= threshold;
-    },
-  };
-}
-
-function vcTimeAchievement({ id, name, description, reward, threshold }) {
-  return {
-    id,
-    name,
-    description,
-    reward,
-    check: async (playerId, db) => {
-      const row = await db.getAsync(
-        `SELECT vc_time FROM player_statistics WHERE id = ?`,
-        [playerId]
-      );
-      return row?.vc_time >= threshold;
-    },
-  };
-}
-
-function messageCountAchievement({ id, name, description, reward, threshold }) {
-  return {
-    id,
-    name,
-    description,
-    reward,
-    statKey: "messages_sent",
-    threshold,
-    check: async (playerId, db) => {
-      const row = await db.getAsync(
-        `SELECT messages_sent FROM player_statistics WHERE id = ?`,
-        [playerId]
-      );
-      return row?.messages_sent >= threshold;
-    },
-  };
-}
-
 function platformUsageAchievement({ id, name, description, reward }) {
   return {
     id,
@@ -583,7 +325,7 @@ function platformUsageAchievement({ id, name, description, reward }) {
     check: async (playerId, db) => {
       const row = await db.getAsync(
         `SELECT platform_usage_pc, platform_usage_xbox, platform_usage_playstation
-           FROM player_statistics WHERE id = ?`,
+             FROM player_statistics WHERE id = ?`,
         [playerId]
       );
 
@@ -612,11 +354,11 @@ function samePartnerCountAchievement({
     check: async (playerId, db) => {
       const row = await db.getAsync(
         `SELECT MAX(match_count) AS max_count FROM (
-             SELECT COUNT(*) AS match_count
-             FROM duo_partner_history
-             WHERE player_id = ?
-             GROUP BY partner_id
-           )`,
+               SELECT COUNT(*) AS match_count
+               FROM duo_partner_history
+               WHERE player_id = ?
+               GROUP BY partner_id
+             )`,
         [playerId]
       );
       return row?.max_count >= threshold;
@@ -645,41 +387,6 @@ function storePurchaseAchievement({
     },
   };
 }
-
-function mentionChastisedAchievement({ id, name, description, reward }) {
-  return {
-    id,
-    name,
-    description,
-    reward,
-    check: async (playerId, db) => {
-      const row = await db.getAsync(
-        `SELECT COUNT(*) AS count FROM player_mention_violations WHERE player_id = ?`,
-        [playerId]
-      );
-      return (row?.count || 0) >= 1;
-    },
-  };
-}
-
-async function checkSelflessMvpAchievement(playerId, db) {
-  const lastReceived = await db.getAsync(
-    `SELECT MAX(awarded_at) AS lastReceived FROM mvp_awards WHERE receiver_id = ?`,
-    [playerId]
-  );
-
-  const since = lastReceived?.lastReceived || 0;
-
-  const givenAfter = await db.getAsync(
-    `SELECT COUNT(*) AS count FROM mvp_awards WHERE giver_id = ? AND awarded_at > ?`,
-    [playerId, since]
-  );
-
-  if (givenAfter?.count >= 10) {
-    await unlockAchievementIfNotEarned(playerId, "selfless_mvp");
-  }
-}
-
 function dualMvpAchievement({ id, name, description, reward }) {
   return {
     id,
@@ -689,30 +396,14 @@ function dualMvpAchievement({ id, name, description, reward }) {
     check: async (playerId, db) => {
       const row = await db.getAsync(
         `SELECT match_id
-           FROM mvp_awards
-           WHERE receiver_id = ?
-           GROUP BY match_id
-           HAVING COUNT(DISTINCT giver_id) >= 2
-           LIMIT 1`,
+             FROM mvp_awards
+             WHERE receiver_id = ?
+             GROUP BY match_id
+             HAVING COUNT(DISTINCT giver_id) >= 2
+             LIMIT 1`,
         [playerId]
       );
       return !!row;
-    },
-  };
-}
-
-function mvpCooldownAttemptAchievement({ id, name, description, reward }) {
-  return {
-    id,
-    name,
-    description,
-    reward,
-    check: async (playerId, db) => {
-      const row = await db.getAsync(
-        `SELECT COUNT(*) AS count FROM mvp_award_attempts WHERE player_id = ? AND was_blocked = 1`,
-        [playerId]
-      );
-      return row?.count >= 1;
     },
   };
 }
@@ -880,313 +571,20 @@ function mvpDailyCapAchievement({ id, name, description, reward, cap = 10 }) {
   };
 }
 
-async function unlockAchievementIfNotEarned(playerId, achievementId) {
-  const alreadyUnlocked = await db.getAsync(
-    `SELECT 1 FROM player_achievements WHERE player_id = ? AND achievement_id = ?`,
-    [playerId, achievementId]
-  );
-
-  if (alreadyUnlocked) return false;
-
-  const achievement = await db.getAsync(
-    `SELECT * FROM achievements WHERE achievement_id = ?`,
-    [achievementId]
-  );
-
-  if (!achievement) return false;
-
-  await db.runAsync(
-    `INSERT INTO player_achievements (player_id, achievement_id, unlocked_at) VALUES (?, ?, ?)`,
-    [playerId, achievementId, Date.now()]
-  );
-
-  // 💰 Apply reward if applicable
-  if (achievement.reward > 0) {
-    await db.runAsync(
-      `INSERT INTO player_currency (player_id, balance)
-       VALUES (?, ?)
-       ON CONFLICT(player_id) DO UPDATE SET balance = balance + ?`,
-      [playerId, achievement.reward, achievement.reward]
-    );
-
-    await logCurrencyChange({
-      playerId,
-      amount: achievement.reward,
-      source: "achievement",
-      source_id: achievementId,
-      modified_by: "system",
-      reason: `Unlocked achievement: ${achievement.name}`,
-    });
-  }
-  // 🟢 Unlock meta “achievement count” achievements
-  await unlockMetaAchievementThreshold(playerId, db);
-
-  // 📢 Send Discord alert
-  try {
-    const user = await client.users.fetch(playerId);
-    const channel = await client.channels.fetch(QUEUE_ALERT_CHANNEL);
-    if (channel && channel.isTextBased()) {
-      const embed = new EmbedBuilder()
-        .setColor(0xfacc15)
-        .setAuthor({
-          name: `${user.username} unlocked a new achievement!`,
-          iconURL: user.displayAvatarURL(),
-        })
-        .setTitle(`🏆 ${achievement.name}`)
-        .setDescription(achievement.description)
-        .addFields({
-          name: "Reward",
-          value: `${achievement.reward} 🪙`,
-          inline: true,
-        })
-        .setTimestamp();
-
-      await channel.send({
-        content: `<@${playerId}> just unlocked an achievement!`,
-        embeds: [embed],
-      });
-    }
-  } catch (err) {
-    console.warn("⚠️ Failed to send achievement alert:", err);
-  }
-
-  return true;
-}
-
-async function awardHighTurnoverAchievements(matchId) {
-  try {
-    const match = await db.getAsync(
-      `SELECT initial_player_ids, final_player_ids FROM transcripts WHERE match_id = ?`,
-      [matchId]
-    );
-
-    const initial = new Set(
-      (match?.initial_player_ids || "").split(",").filter(Boolean)
-    );
-    const final = new Set(
-      (match?.final_player_ids || "").split(",").filter(Boolean)
-    );
-
-    const events = await db.allAsync(
-      `SELECT playerId, eventType, timestamp FROM match_events
-           WHERE match_id = ? AND eventType IN ('join', 'leave', 'match_cleanup')
-           ORDER BY timestamp ASC`,
-      [matchId]
-    );
-
-    if (!events.length) {
-      logger.warn("No match events found for turnover achievement", {
-        matchId,
-      });
-      return;
-    }
-
-    // 📊 Build presence intervals per player
-    const intervals = {};
-    for (const { playerId, eventType, timestamp } of events) {
-      if (!intervals[playerId]) intervals[playerId] = [];
-
-      if (eventType === "join") {
-        intervals[playerId].push({ start: timestamp, end: null });
-      } else if (["leave", "match_cleanup"].includes(eventType)) {
-        const open = intervals[playerId]?.find((i) => i.end === null);
-        if (open) open.end = timestamp;
-      }
-    }
-
-    // 🧠 For each player who started and finished, check overlap
-    for (const [playerId, spans] of Object.entries(intervals)) {
-      if (!initial.has(playerId) || !final.has(playerId)) continue;
-
-      const seen = new Set();
-
-      for (const { start, end } of spans) {
-        for (const [otherId, otherSpans] of Object.entries(intervals)) {
-          if (otherId === playerId) continue;
-
-          for (const other of otherSpans) {
-            const overlap =
-              !end || !other.end || (start < other.end && end > other.start);
-            if (overlap) {
-              seen.add(otherId);
-              break;
-            }
-          }
-        }
-      }
-
-      const count = seen.size;
-
-      if (count >= 10) {
-        await unlockAchievementIfNotEarned(playerId, "players_10");
-      } else if (count >= 8) {
-        await unlockAchievementIfNotEarned(playerId, "players_8");
-      } else if (count >= 6) {
-        await unlockAchievementIfNotEarned(playerId, "players_6");
-      } else if (count >= 4) {
-        await unlockAchievementIfNotEarned(playerId, "players_4");
-      }
-    }
-  } catch (err) {
-    logger.errorWrapper("awardHighTurnoverAchievements", err, { matchId });
-  }
-}
-
-async function checkRepeatPartnerAchievements(matchId, formationType, players) {
-  const isEligibleFormation =
-    formationType === "solo" || formationType === "duo";
-  if (!isEligibleFormation || players.length < 2) return;
-
-  const uniquePlayerIds = [...new Set(players)];
-
-  for (const playerId of uniquePlayerIds) {
-    const partnerIds = uniquePlayerIds.filter((id) => id !== playerId);
-
-    // Skip if player is in a premade duo
-    if (formationType === "duo") {
+function mvpCooldownAttemptAchievement({ id, name, description, reward }) {
+  return {
+    id,
+    name,
+    description,
+    reward,
+    check: async (playerId, db) => {
       const row = await db.getAsync(
-        `SELECT duoPartner FROM players WHERE id = ?`,
+        `SELECT COUNT(*) AS count FROM mvp_award_attempts WHERE player_id = ? AND was_blocked = 1`,
         [playerId]
       );
-      if (row?.duoPartner && partnerIds.includes(row.duoPartner)) continue;
-    }
-
-    for (const partnerId of partnerIds) {
-      // Check how many times this player has previously played with this partner (excluding current match)
-      const countRow = await db.getAsync(
-        `
-          SELECT COUNT(*) AS count
-          FROM matches
-          WHERE match_id != ?
-            AND formation_type IN ('solo', 'duo')
-            AND (
-              (initial_player_ids LIKE ? AND initial_player_ids LIKE ?)
-            )
-          `,
-        [matchId, `%${playerId}%`, `%${partnerId}%`]
-      );
-
-      const previousCount = countRow?.count || 0;
-      const newCount = previousCount + 1;
-
-      await unlockRepeatPartnerAchievements(playerId, newCount);
-    }
-  }
-}
-
-async function check24hMatchCompletionStreak(playerId) {
-  try {
-    const since = Date.now() - 24 * 60 * 60 * 1000;
-
-    const rows = await db.allAsync(
-      `SELECT closed_at FROM transcripts
-         WHERE (',' || final_player_ids || ',') LIKE ? AND closed_at >= ?`,
-      [`%,${playerId},%`, since]
-    );
-
-    const count = rows.length;
-
-    await unlockThresholdAchievementsFromValue(
-      playerId,
-      count,
-      matchCompletionStreakAchievements
-    );
-  } catch (err) {
-    logger.warn("⚠️ Failed to check 24h match streak", {
-      playerId,
-      error: err.message,
-    });
-  }
-}
-
-async function checkReadyCheckMilestones(playerId) {
-  const row = await db.getAsync(
-    `SELECT ready_checks_passed FROM player_statistics WHERE id = ?`,
-    [playerId]
-  );
-
-  const value = row?.ready_checks_passed || 0;
-  const thresholds = [
-    { id: "locked_and_loaded", value: 1 },
-    { id: "eager_beaver", value: 10 },
-    { id: "glued_to_the_screen", value: 25 },
-    { id: "strapped_to_the_chair", value: 50 },
-    { id: "no_bathroom_breaks", value: 100 },
-    { id: "ready_player_one", value: 250 },
-    { id: "i_was_born_ready", value: 500 },
-  ];
-
-  for (const { id, value: threshold } of thresholds) {
-    if (value >= threshold) {
-      await unlockAchievementIfNotEarned(playerId, id);
-    }
-  }
-}
-
-async function trackNewUniquePartners(playerIds = []) {
-  if (playerIds.length < 2) return;
-
-  const uniquePlayerIds = [...new Set(playerIds)];
-
-  try {
-    for (const playerId of uniquePlayerIds) {
-      const partners = uniquePlayerIds.filter((id) => id !== playerId);
-
-      try {
-        // Insert or ignore partner entries in parallel
-        await Promise.all(
-          partners.map((partnerId) => {
-            return new Promise((resolve, reject) => {
-              db.run(
-                `INSERT OR IGNORE INTO player_partners (player_id, partner_id)
-                     VALUES (?, ?)`,
-                [playerId, partnerId],
-                (err) => (err ? reject(err) : resolve())
-              );
-            });
-          })
-        );
-
-        // Count current total unique partners
-        const totalPartners = await new Promise((resolve, reject) => {
-          db.get(
-            `SELECT COUNT(*) AS total FROM player_partners WHERE player_id = ?`,
-            [playerId],
-            (err, row) => (err ? reject(err) : resolve(row?.total || 0))
-          );
-        });
-
-        logger.info(`👥 ${playerId} has ${totalPartners} unique partners`);
-
-        // Unlock achievements based on thresholds
-        await unlockUniquePartnerAchievements(
-          playerId,
-          uniquePartnerAchievements
-        );
-      } catch (err) {
-        logger.errorWrapper("trackNewUniquePartners - Player Loop Error", err, {
-          playerId,
-        });
-      }
-    }
-  } catch (err) {
-    logger.errorWrapper("trackNewUniquePartners - Outer Error", err, {
-      playerIds,
-    });
-  }
-}
-
-async function unlockUniquePartnerAchievements(playerId, achievements) {
-  const row = await db.getAsync(
-    `SELECT COUNT(DISTINCT partner_id) AS count FROM player_partners WHERE player_id = ?`,
-    [playerId]
-  );
-  const totalPartners = row?.count || 0;
-
-  const unlocks = achievements.filter((a) => totalPartners >= a.threshold);
-  await Promise.all(
-    unlocks.map((a) => unlockAchievementIfNotEarned(playerId, a.id))
-  );
+      return row?.count >= 1;
+    },
+  };
 }
 
 const readyCheckAchievements = [
@@ -2527,6 +1925,619 @@ const mvpMaxDailyAchievement = {
   cap: 10, // from your config
 };
 
+async function unlockAchievementIfNotEarned(playerId, achievementId) {
+  const alreadyUnlocked = await db.getAsync(
+    `SELECT 1 FROM player_achievements WHERE player_id = ? AND achievement_id = ?`,
+    [playerId, achievementId]
+  );
+
+  if (alreadyUnlocked) {
+    logger.debug(
+      `🎯 Achievement already unlocked: ${achievementId} for ${playerId}`
+    );
+    return false;
+  }
+
+  const achievement = await db.getAsync(
+    `SELECT * FROM achievements WHERE achievement_id = ?`,
+    [achievementId]
+  );
+
+  if (!achievement) {
+    logger.warn(
+      `❌ Achievement ID not found: ${achievementId} for ${playerId}`
+    );
+    return false;
+  }
+
+  logger.info(
+    `🏆 Achievement unlocked: ${achievementId} for ${playerId} (Reward: ${achievement.reward})`
+  );
+
+  await db.runAsync(
+    `INSERT INTO player_achievements (player_id, achievement_id, unlocked_at) VALUES (?, ?, ?)`,
+    [playerId, achievementId, Date.now()]
+  );
+
+  // 💰 Apply reward if applicable
+  if (achievement.reward > 0) {
+    await db.runAsync(
+      `INSERT INTO player_currency (player_id, balance)
+         VALUES (?, ?)
+         ON CONFLICT(player_id) DO UPDATE SET balance = balance + ?`,
+      [playerId, achievement.reward, achievement.reward]
+    );
+
+    await logCurrencyChange({
+      playerId,
+      amount: achievement.reward,
+      source: "achievement",
+      source_id: achievementId,
+      modified_by: "system",
+      reason: `Unlocked achievement: ${achievement.name}`,
+    });
+  }
+  // 🟢 Unlock meta “achievement count” achievements
+  setImmediate(() => {
+    unlockMetaAchievementThreshold(playerId, db).catch((err) => {
+      logger.errorWrapper("Meta achievement unlock failed", err, { playerId });
+    });
+  });
+
+  // 📢 Send Discord alert
+  try {
+    const user = await client.users.fetch(playerId);
+    const channel = await client.channels.fetch(QUEUE_ALERT_CHANNEL);
+    if (channel && channel.isTextBased()) {
+      const embed = new EmbedBuilder()
+        .setColor(0xfacc15)
+        .setAuthor({
+          name: `${user.username} unlocked a new achievement!`,
+          iconURL: user.displayAvatarURL(),
+        })
+        .setTitle(`🏆 ${achievement.name}`)
+        .setDescription(achievement.description)
+        .addFields({
+          name: "Reward",
+          value: `${achievement.reward} 🪙`,
+          inline: true,
+        })
+        .setTimestamp();
+
+      await channel.send({
+        content: `<@${playerId}> just unlocked an achievement!`,
+        embeds: [embed],
+      });
+    }
+  } catch (err) {
+    console.warn("⚠️ Failed to send achievement alert:", err);
+  }
+
+  return true;
+}
+
+async function unlockMetaAchievementThreshold(playerId, db) {
+  const row = await db.getAsync(
+    `SELECT COUNT(*) AS count FROM player_achievements WHERE player_id = ?`,
+    [playerId]
+  );
+
+  const unlockedCount = row?.count || 0;
+
+  const sorted = metaAchievements.sort((a, b) => a.threshold - b.threshold);
+
+  for (const achievement of sorted) {
+    const alreadyUnlocked = await db.getAsync(
+      `SELECT 1 FROM player_achievements WHERE player_id = ? AND achievement_id = ?`,
+      [playerId, achievement.id]
+    );
+    if (alreadyUnlocked) continue;
+
+    // Handle special case for 'achievements_all'
+    const totalAchievements =
+      achievement.id === "achievements_all"
+        ? (await db.getAsync(`SELECT COUNT(*) AS total FROM achievements`))
+            .total
+        : achievement.threshold;
+
+    if (unlockedCount >= totalAchievements) {
+      await unlockAchievementIfNotEarned(playerId, achievement.id);
+      break; // ✅ Only unlock one at a time
+    }
+  }
+}
+
+async function unlockMatchDurationAchievementThreshold(
+  playerId,
+  newDuration,
+  db
+) {
+  // Sort by ascending threshold
+  const sorted = matchDurationAchievements.sort(
+    (a, b) => a.check.threshold - b.check.threshold
+  );
+
+  for (const achievement of sorted) {
+    const alreadyUnlocked = await db.getAsync(
+      `SELECT 1 FROM player_achievements WHERE player_id = ? AND achievement_id = ?`,
+      [playerId, achievement.id]
+    );
+    if (alreadyUnlocked) continue;
+
+    // Check if they *just reached* this threshold
+    if (newDuration >= achievement.check.threshold) {
+      await unlockAchievementIfNotEarned(playerId, achievement.id, db);
+      break; // ✅ Only unlock one per update
+    }
+  }
+}
+
+async function checkDailyMatchStreakAchievements(playerId) {
+  try {
+    for (const achievement of dailyMatchStreakAchievements) {
+      const passed = await achievement.check(playerId, db);
+      if (passed) {
+        await unlockAchievementIfNotEarned(playerId, achievement.id);
+      }
+    }
+  } catch (err) {
+    logger.warn("⚠️ Failed to check daily match streak achievements", {
+      playerId,
+      error: err.message,
+    });
+  }
+}
+
+async function checkCurrencyAchievements(playerId, db) {
+  try {
+    const row = await db.getAsync(
+      `SELECT balance FROM player_currency WHERE player_id = ?`,
+      [playerId]
+    );
+
+    const balance = row?.balance || 0;
+
+    for (const achievement of currencyAchievements) {
+      if (balance >= achievement.threshold) {
+        await unlockAchievementIfNotEarned(playerId, achievement.id);
+      }
+    }
+  } catch (err) {
+    console.error("❌ Failed to check currency achievements:", err);
+  }
+}
+
+async function checkMatchCompletionPointAchievements(playerId, db) {
+  try {
+    const row = await db.getAsync(
+      `SELECT SUM(points) AS total FROM match_completion_awards WHERE player_id = ?`,
+      [playerId]
+    );
+
+    const total = row?.total || 0;
+
+    for (const achievement of matchCompletionPointAchievements) {
+      if (await achievement.check(playerId, db)) {
+        await unlockAchievementIfNotEarned(playerId, achievement.id);
+      }
+    }
+  } catch (err) {
+    console.error("❌ Failed to check match completion achievements:", err);
+  }
+}
+
+async function checkMvpGivenAchievements(playerId, db) {
+  try {
+    const row = await db.getAsync(
+      `SELECT COUNT(*) as count FROM mvp_awards WHERE giver_id = ?`,
+      [playerId]
+    );
+
+    const givenCount = row?.count || 0;
+    await unlockThresholdAchievementsFromValue(
+      playerId,
+      givenCount,
+      mvpGivenAchievements
+    );
+    logger.info(
+      `Checking MVP achievements for ${playerId}, count: ${givenCount}`
+    );
+  } catch (err) {
+    logger.error("❌ Failed to check/unlock MVP given achievements", {
+      playerId,
+      error: err,
+    });
+  }
+}
+
+async function checkMvpReceivedAchievements(playerId, db) {
+  try {
+    const row = await db.getAsync(
+      `SELECT COUNT(*) as count FROM mvp_awards WHERE receiver_id = ?`,
+      [playerId]
+    );
+
+    const receivedCount = row?.count || 0;
+    await unlockThresholdAchievementsFromValue(
+      playerId,
+      receivedCount,
+      mvpReceivedAchievements
+    );
+    logger.info(
+      `Checking MVP achievements for ${playerId}, count: ${receivedCount}`
+    );
+  } catch (err) {
+    logger.error("❌ Failed to check/unlock MVP received achievements", {
+      playerId,
+      error: err,
+    });
+  }
+}
+
+async function unlockRepeatPartnerAchievements(playerId, repeatCount) {
+  const unlockable = repeatPartnerAchievements.filter(
+    (a) => repeatCount >= a.threshold
+  );
+
+  for (const achievement of unlockable) {
+    try {
+      await unlockAchievementIfNotEarned(playerId, achievement.id);
+    } catch (err) {
+      logger.warn("⚠️ Failed to unlock repeat partner achievement", {
+        playerId,
+        achievementId: achievement.id,
+        error: err.message,
+      });
+    }
+  }
+}
+
+async function unlockThresholdAchievementsFromValue(
+  playerId,
+  value,
+  achievements
+) {
+  const unlocks = achievements.filter((a) => value >= a.threshold);
+  if (value <= 0) return;
+
+  for (const a of unlocks) {
+    await unlockAchievementIfNotEarned(playerId, a.id);
+  }
+}
+async function checkDualMvp(receiverId, matchId, db) {
+  const rows = await db.allAsync(
+    `SELECT giver_id FROM mvp_awards WHERE receiver_id = ? AND match_id = ?`,
+    [receiverId, matchId]
+  );
+
+  const uniqueGivers = [...new Set(rows.map((r) => r.giver_id))];
+
+  if (uniqueGivers.length >= 2) {
+    await unlockAchievementIfNotEarned(receiverId, "mvp_dual");
+  }
+}
+
+async function unlockStatThresholdAchievements(
+  playerId,
+  statKey,
+  achievements
+) {
+  const row = await db.getAsync(
+    `SELECT ${statKey} FROM player_statistics WHERE id = ?`,
+    [playerId]
+  );
+  const value = row?.[statKey] || 0;
+
+  const unlocks = achievements.filter((a) => value >= a.threshold);
+  await Promise.all(
+    unlocks.map((a) => unlockAchievementIfNotEarned(playerId, a.id))
+  );
+}
+
+async function checkEventCompletionAchievements(playerId) {
+  try {
+    const row = await db.getAsync(
+      `SELECT COUNT(*) AS count FROM event_progress WHERE player_id = ? AND completed = 1`,
+      [playerId]
+    );
+
+    const completedCount = row?.count || 0;
+
+    await unlockThresholdAchievementsFromValue(
+      playerId,
+      completedCount,
+      eventCompletionAchievements
+    );
+  } catch (err) {
+    logger.error("❌ Failed to check/unlock event completion achievements", {
+      playerId,
+      error: err,
+    });
+  }
+}
+
+async function checkSelflessMvpAchievement(playerId, db) {
+  const lastReceived = await db.getAsync(
+    `SELECT MAX(awarded_at) AS lastReceived FROM mvp_awards WHERE receiver_id = ?`,
+    [playerId]
+  );
+
+  const since = lastReceived?.lastReceived || 0;
+
+  const givenAfter = await db.getAsync(
+    `SELECT COUNT(*) AS count FROM mvp_awards WHERE giver_id = ? AND awarded_at > ?`,
+    [playerId, since]
+  );
+
+  if (givenAfter?.count >= 10) {
+    await unlockAchievementIfNotEarned(playerId, "selfless_mvp");
+  }
+}
+
+async function awardHighTurnoverAchievements(matchId) {
+  try {
+    const match = await db.getAsync(
+      `SELECT initial_player_ids, final_player_ids FROM transcripts WHERE match_id = ?`,
+      [matchId]
+    );
+
+    const initial = new Set(
+      (match?.initial_player_ids || "").split(",").filter(Boolean)
+    );
+    const final = new Set(
+      (match?.final_player_ids || "").split(",").filter(Boolean)
+    );
+
+    const events = await db.allAsync(
+      `SELECT playerId, eventType, timestamp FROM match_events
+           WHERE match_id = ? AND eventType IN ('join', 'leave', 'match_cleanup')
+           ORDER BY timestamp ASC`,
+      [matchId]
+    );
+
+    if (!events.length) {
+      logger.warn("No match events found for turnover achievement", {
+        matchId,
+      });
+      return;
+    }
+
+    // 📊 Build presence intervals per player
+    const intervals = {};
+    for (const { playerId, eventType, timestamp } of events) {
+      if (!intervals[playerId]) intervals[playerId] = [];
+
+      if (eventType === "join") {
+        intervals[playerId].push({ start: timestamp, end: null });
+      } else if (["leave", "match_cleanup"].includes(eventType)) {
+        const open = intervals[playerId]?.find((i) => i.end === null);
+        if (open) open.end = timestamp;
+      }
+    }
+
+    // 🧠 For each player who started and finished, check overlap
+    for (const [playerId, spans] of Object.entries(intervals)) {
+      if (!initial.has(playerId) || !final.has(playerId)) continue;
+
+      const seen = new Set();
+
+      for (const { start, end } of spans) {
+        for (const [otherId, otherSpans] of Object.entries(intervals)) {
+          if (otherId === playerId) continue;
+
+          for (const other of otherSpans) {
+            const overlap =
+              !end || !other.end || (start < other.end && end > other.start);
+            if (overlap) {
+              seen.add(otherId);
+              break;
+            }
+          }
+        }
+      }
+
+      const count = seen.size;
+
+      if (count >= 10) {
+        await unlockAchievementIfNotEarned(playerId, "players_10");
+      } else if (count >= 8) {
+        await unlockAchievementIfNotEarned(playerId, "players_8");
+      } else if (count >= 6) {
+        await unlockAchievementIfNotEarned(playerId, "players_6");
+      } else if (count >= 4) {
+        await unlockAchievementIfNotEarned(playerId, "players_4");
+      }
+    }
+  } catch (err) {
+    logger.errorWrapper("awardHighTurnoverAchievements", err, { matchId });
+  }
+}
+
+async function checkRepeatPartnerAchievements(matchId, formationType, players) {
+  const isEligibleFormation =
+    formationType === "solo" || formationType === "duo";
+  if (!isEligibleFormation || players.length < 2) return;
+
+  const uniquePlayerIds = [...new Set(players)];
+
+  for (const playerId of uniquePlayerIds) {
+    const partnerIds = uniquePlayerIds.filter((id) => id !== playerId);
+
+    // Skip if player is in a premade duo
+    if (formationType === "duo") {
+      const row = await db.getAsync(
+        `SELECT duoPartner FROM players WHERE id = ?`,
+        [playerId]
+      );
+      if (row?.duoPartner && partnerIds.includes(row.duoPartner)) continue;
+    }
+
+    for (const partnerId of partnerIds) {
+      // Check how many times this player has previously played with this partner (excluding current match)
+      const countRow = await db.getAsync(
+        `
+          SELECT COUNT(*) AS count
+          FROM matches
+          WHERE match_id != ?
+            AND formation_type IN ('solo', 'duo')
+            AND (
+              (initial_player_ids LIKE ? AND initial_player_ids LIKE ?)
+            )
+          `,
+        [matchId, `%${playerId}%`, `%${partnerId}%`]
+      );
+
+      const previousCount = countRow?.count || 0;
+      const newCount = previousCount + 1;
+
+      await unlockRepeatPartnerAchievements(playerId, newCount);
+    }
+  }
+}
+
+async function check24hMatchCompletionStreak(playerId) {
+  try {
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+
+    const rows = await db.allAsync(
+      `SELECT closed_at FROM transcripts
+         WHERE (',' || final_player_ids || ',') LIKE ? AND closed_at >= ?`,
+      [`%,${playerId},%`, since]
+    );
+
+    const count = rows.length;
+
+    await unlockThresholdAchievementsFromValue(
+      playerId,
+      count,
+      matchCompletionStreakAchievements
+    );
+  } catch (err) {
+    logger.warn("⚠️ Failed to check 24h match streak", {
+      playerId,
+      error: err.message,
+    });
+  }
+}
+
+async function checkReadyCheckMilestones(playerId) {
+  const row = await db.getAsync(
+    `SELECT ready_checks_passed FROM player_statistics WHERE id = ?`,
+    [playerId]
+  );
+
+  const value = row?.ready_checks_passed || 0;
+  const thresholds = [
+    { id: "locked_and_loaded", value: 1 },
+    { id: "eager_beaver", value: 10 },
+    { id: "glued_to_the_screen", value: 25 },
+    { id: "strapped_to_the_chair", value: 50 },
+    { id: "no_bathroom_breaks", value: 100 },
+    { id: "ready_player_one", value: 250 },
+    { id: "i_was_born_ready", value: 500 },
+  ];
+
+  for (const { id, value: threshold } of thresholds) {
+    if (value >= threshold) {
+      await unlockAchievementIfNotEarned(playerId, id);
+    }
+  }
+}
+
+async function trackNewUniquePartners(playerIds = []) {
+  if (playerIds.length < 2) return;
+
+  const uniquePlayerIds = [...new Set(playerIds)];
+
+  try {
+    for (const playerId of uniquePlayerIds) {
+      const partners = uniquePlayerIds.filter((id) => id !== playerId);
+
+      try {
+        // Insert or ignore partner entries in parallel
+        await Promise.all(
+          partners.map((partnerId) => {
+            return new Promise((resolve, reject) => {
+              db.run(
+                `INSERT OR IGNORE INTO player_partners (player_id, partner_id)
+                     VALUES (?, ?)`,
+                [playerId, partnerId],
+                (err) => (err ? reject(err) : resolve())
+              );
+            });
+          })
+        );
+
+        // Count current total unique partners
+        const totalPartners = await new Promise((resolve, reject) => {
+          db.get(
+            `SELECT COUNT(*) AS total FROM player_partners WHERE player_id = ?`,
+            [playerId],
+            (err, row) => (err ? reject(err) : resolve(row?.total || 0))
+          );
+        });
+
+        logger.info(`👥 ${playerId} has ${totalPartners} unique partners`);
+
+        // Unlock achievements based on thresholds
+        await unlockUniquePartnerAchievements(
+          playerId,
+          uniquePartnerAchievements
+        );
+      } catch (err) {
+        logger.errorWrapper("trackNewUniquePartners - Player Loop Error", err, {
+          playerId,
+        });
+      }
+    }
+  } catch (err) {
+    logger.errorWrapper("trackNewUniquePartners - Outer Error", err, {
+      playerIds,
+    });
+  }
+}
+
+async function unlockUniquePartnerAchievements(playerId, achievements) {
+  const row = await db.getAsync(
+    `SELECT COUNT(DISTINCT partner_id) AS count FROM player_partners WHERE player_id = ?`,
+    [playerId]
+  );
+  const totalPartners = row?.count || 0;
+
+  const unlocks = achievements.filter((a) => totalPartners >= a.threshold);
+  await Promise.all(
+    unlocks.map((a) => unlockAchievementIfNotEarned(playerId, a.id))
+  );
+}
+
+async function checkFormationDiversity(playerId) {
+  const row = await db.getAsync(
+    `SELECT queue_entries_solo, queue_entries_duo, queue_entries_trio FROM player_statistics WHERE id = ?`,
+    [playerId]
+  );
+  if (
+    row?.queue_entries_solo &&
+    row.queue_entries_duo &&
+    row.queue_entries_trio
+  ) {
+    await unlockAchievementIfNotEarned(playerId, "formation_diversity");
+  }
+}
+
+async function checkPlatformDiversity(playerId) {
+  const row = await db.getAsync(
+    `SELECT platform_usage_pc, platform_usage_xbox, platform_usage_playstation FROM player_statistics WHERE id = ?`,
+    [playerId]
+  );
+  if (
+    row?.platform_usage_pc &&
+    row.platform_usage_xbox &&
+    row.platform_usage_playstation
+  ) {
+    await unlockAchievementIfNotEarned(playerId, "platforms_all");
+  }
+}
+
 const achieveExports = {
   readyCheckAchievements,
   allQueueEntryAchievements,
@@ -2601,6 +2612,58 @@ const achieveExports = {
     ...readyCheckFailAchievements,
     ...storePurchaseAchievements,
   ],
+  // Common stat helpers
+  statThresholdAchievement,
+  uniquePartnersAchievement,
+  repeatPartnerAchievement,
+  mvpGivenAchievement,
+  mvpReceivedAchievement,
+  eventCompletionAchievement,
+  matchCompletionPointAchievement,
+  matchCompletionStreakAchievement,
+  dailyMatchStreakAchievement,
+  matchDurationAchievement,
+  achievementCountAchievement,
+  currencyThresholdAchievement,
+
+  vcTimeAchievement,
+  messageCountAchievement,
+  platformUsageAchievement,
+
+  samePartnerCountAchievement,
+
+  storePurchaseAchievement,
+
+  // Custom logic helpers
+  mentionChastisedAchievement,
+  dualMvpAchievement,
+  mvpCooldownAttemptAchievement,
+  currencySpentAchievement,
+  currencyZeroedAchievement,
+  storeCompleteAchievement,
+
+  botMentionAchievement,
+  formationDiversityAchievement,
+  playersInMatchAchievement,
+  unlockAchievementIfNotEarned,
+  awardHighTurnoverAchievements,
+  checkRepeatPartnerAchievements,
+  check24hMatchCompletionStreak,
+  checkReadyCheckMilestones,
+  trackNewUniquePartners,
+  checkEventCompletionAchievements,
+  unlockStatThresholdAchievements,
+  unlockUniquePartnerAchievements,
+  checkMvpGivenAchievements,
+  checkMvpReceivedAchievements,
+  checkSelflessMvpAchievement,
+  checkMatchCompletionPointAchievements,
+  checkCurrencyAchievements,
+  checkDailyMatchStreakAchievements,
+  unlockMatchDurationAchievementThreshold,
+  checkFormationDiversity,
+  checkPlatformDiversity,
+  checkDualMvp,
 };
 
 module.exports = achieveExports;

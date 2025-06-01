@@ -27,7 +27,19 @@ const {
   unlockAchievementIfNotEarned,
   checkRepeatPartnerAchievements,
   trackNewUniquePartners,
+  checkFormationDiversity,
+  checkPlatformDiversity,
 } = require("../../utils/achievementHelpers");
+
+function generateMatchPassword() {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let result = "";
+  for (let i = 0; i < 5; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
 
 async function startMatch(
   client,
@@ -35,7 +47,7 @@ async function startMatch(
   players,
   formationType = "unknown"
 ) {
-  if (!players || players.length === 0) {
+  if (!players?.length) {
     logger.warn("startMatch was called with an empty match list.");
     return;
   }
@@ -51,37 +63,33 @@ async function startMatch(
     const guild = client.guilds.cache.first();
     const fetchedChannels = await guild.channels.fetch();
     const activeThreads = fetchedChannels.filter((c) => c.isThread()).size;
-    const placeholders = players.map(() => "?").join(", ");
 
     if (activeThreads >= 1000) {
       logger.warn("Thread limit (1000) reached. Match aborted.");
-
       await db.run(
-        `UPDATE players SET duoPartner = NULL WHERE id IN (${placeholders})`,
+        `UPDATE players SET duoPartner = NULL WHERE id IN (${players
+          .map(() => "?")
+          .join(",")})`,
         players
       );
-
       return { error: "Thread limit reached — match aborted.", players };
     }
 
-    await new Promise((resolve, reject) => {
-      db.run(
-        `UPDATE players SET status = 'queued' WHERE id IN (${placeholders})`,
-        players,
-        (err) => (err ? reject(err) : resolve())
-      );
-    });
+    await db.runAsync(
+      `UPDATE players SET status = 'queued' WHERE id IN (${players
+        .map(() => "?")
+        .join(",")})`,
+      players
+    );
+
     const platformChannel = await getOrCreatePlatformChannel(guild, platform);
 
-    const existingMatch = await new Promise((resolve, reject) => {
-      db.get(
-        `SELECT threadId FROM match_players 
-         WHERE playerId IN (${players.map(() => "?").join(",")}) 
-         AND status = 'active' LIMIT 1`,
-        players,
-        (err, row) => (err ? reject(err) : resolve(row?.threadId || null))
-      );
-    });
+    const existingMatch = await db.getAsync(
+      `SELECT threadId FROM match_players 
+       WHERE playerId IN (${players.map(() => "?").join(",")}) 
+       AND status = 'active' LIMIT 1`,
+      players
+    );
 
     if (existingMatch) {
       logger.warn(
@@ -104,12 +112,10 @@ async function startMatch(
     }
 
     const matchId = uuidv4();
-
+    const timestamp = Date.now();
     logger.debug(`📌 Tracked initialPlayers for ${thread.id}:`, players);
 
-    const timestamp = Date.now();
-
-    await db.run(
+    await db.runAsync(
       `INSERT INTO matches 
        (match_id, thread_id, platform, created_by, created_at, match_start_time, formation_type, initial_player_ids)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -121,74 +127,34 @@ async function startMatch(
         timestamp,
         timestamp,
         formationType,
-        players.join(","), // store comma-separated player IDs
+        players.join(","),
       ]
     );
-    try {
-      await checkRepeatPartnerAchievements(matchId, formationType, players);
-    } catch (err) {
-      logger.error("Error checking repeat partner achievements", {
-        matchId,
-        err,
-      });
-    }
 
     await incrementBotStatistic("total_matches_created", 1);
     await incrementBotStatistic(`matches_created_${platform}`, 1);
 
-    await new Promise((resolve, reject) => {
-      db.run(
-        `INSERT OR REPLACE INTO channels 
-         (id, threadId, voiceChannelId, match_id, playerIds, lastActivity, lastReadyCheck)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [thread.id, thread.id, null, matchId, players.join(","), timestamp, 0],
-        (err) => (err ? reject(err) : resolve())
-      );
-    });
+    await db.runAsync(
+      `INSERT OR REPLACE INTO channels 
+       (id, threadId, voiceChannelId, match_id, playerIds, lastActivity, lastReadyCheck)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [thread.id, thread.id, null, matchId, players.join(","), timestamp, 0]
+    );
 
     for (const playerId of players) {
-      await new Promise((resolve, reject) => {
-        db.run(
-          `INSERT INTO match_players (match_id, threadId, playerId, status, joined_at)
-           VALUES (?, ?, ?, 'active', ?)
-           ON CONFLICT(match_id, playerId) DO UPDATE SET status = 'active', joined_at = ?`,
-          [matchId, thread.id, playerId, timestamp, timestamp],
-          (err) => (err ? reject(err) : resolve())
-        );
-      });
+      await db.runAsync(
+        `INSERT INTO match_players (match_id, threadId, playerId, status, joined_at)
+         VALUES (?, ?, ?, 'active', ?)
+         ON CONFLICT(match_id, playerId) DO UPDATE SET status = 'active', joined_at = ?`,
+        [matchId, thread.id, playerId, timestamp, timestamp]
+      );
 
-      if (players.length === 3) {
-        const trioGroup = await db.getAsync(
-          `SELECT trio_id FROM trio_partner_groups
-           WHERE active = 1
-             AND player1_id IN (?, ?, ?)
-             AND player2_id IN (?, ?, ?)
-             AND player3_id IN (?, ?, ?)`,
-          [...players, ...players, ...players]
-        );
-
-        if (trioGroup?.trio_id) {
-          await db.runAsync(
-            `UPDATE trio_partner_groups SET active = 0 WHERE trio_id = ?`,
-            [trioGroup.trio_id]
-          );
-          logger.info("🔗 Trio group marked inactive after match start", {
-            matchId,
-            trio_id: trioGroup.trio_id,
-          });
-        }
-      }
-      // 🔄 Ensure trio members are marked active in `players` table
-
-      await new Promise((resolve, reject) => {
-        db.run(
-          `INSERT INTO match_events 
-           (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
-           VALUES (?, ?, ?, 'join', ?, ?, 'active')`,
-          [matchId, thread.id, playerId, timestamp, "startMatch"],
-          (err) => (err ? reject(err) : resolve())
-        );
-      });
+      await db.runAsync(
+        `INSERT INTO match_events 
+         (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
+         VALUES (?, ?, ?, 'join', ?, ?, 'active')`,
+        [matchId, thread.id, playerId, timestamp, "startMatch"]
+      );
 
       const row = await db.getAsync(
         `SELECT id FROM queue_history
@@ -202,92 +168,37 @@ async function startMatch(
           `UPDATE queue_history SET queue_left_at = ? WHERE id = ?`,
           [Date.now(), row.id]
         );
-      } else {
-        logger.debug(
-          "🕵️ No matching queue_history found to update for player",
-          {
-            playerId,
-            platform,
-          }
-        );
       }
 
-      // 🧠 Determine queue intent from queue_history
       const queueRow = await db.getAsync(
         `SELECT duoPartner, trioPartner1, trioPartner2 
-   FROM queue_history
-   WHERE playerId = ? AND queue_left_at IS NULL
-   ORDER BY queue_entered_at DESC LIMIT 1`,
+         FROM queue_history
+         WHERE playerId = ? AND queue_left_at IS NULL
+         ORDER BY queue_entered_at DESC LIMIT 1`,
         [playerId]
       );
 
       let queueFormationType = "solo";
-      if (queueRow?.trioPartner1 && queueRow?.trioPartner2) {
+      if (queueRow?.trioPartner1 && queueRow?.trioPartner2)
         queueFormationType = "trio";
-      } else if (queueRow?.duoPartner) {
-        queueFormationType = "duo";
-      }
+      else if (queueRow?.duoPartner) queueFormationType = "duo";
 
-      // 🏁 Record formation intent
       await db.runAsync(
-        `INSERT OR IGNORE INTO formation_progress (player_id, formation_type)
-   VALUES (?, ?)`,
+        `INSERT OR IGNORE INTO formation_progress (player_id, formation_type) VALUES (?, ?)`,
         [playerId, queueFormationType]
       );
 
-      // 🏆 Check for formation diversity achievement
-      await unlockAchievementIfNotEarned(playerId, "formation_diversity");
-
-      // Build metadata per player
-      const partnerIds = players.filter((id) => id !== playerId);
-      const metadata = {
-        formationType,
-        platform,
-        partnerIds,
-        queueType: formationType,
-      };
-
-      // 🧠 Unique partner check
-      const newUniquePartners = await checkNewUniquePartners(playerId, players);
-      if (newUniquePartners > 0) metadata.newUniquePartners = newUniquePartners;
-
-      // 🔁 Repeat duo/trio partner check
-      if (formationType === "duo" && partnerIds.length === 1) {
-        const isRepeat = await checkRepeatDuo(playerId, partnerIds[0]);
-        if (isRepeat) metadata.repeatDuo = true;
-      }
-
-      if (formationType === "trio" && partnerIds.length === 2) {
-        const isRepeat = await checkRepeatTrio(playerId, partnerIds);
-        if (isRepeat) metadata.repeatTrio = true;
-      }
-
-      // 🎯 Evaluate event goals
-      await Promise.all([
-        evaluateEventProgress(playerId, "matches_played", 1, metadata),
-        evaluateEventProgress(playerId, "play_match", 1, metadata),
-        evaluateEventProgress(playerId, "play_with_user", 1, metadata),
-        evaluateEventProgress(playerId, "unique_partners", 1, metadata),
-        evaluateEventProgress(playerId, "repeat_duo", 1, metadata),
-        evaluateEventProgress(playerId, "repeat_trio", 1, metadata),
-        evaluateEventProgress(playerId, "solo_stranger_matches", 1, metadata),
-        evaluateEventProgress(playerId, "play_match_duo", 1, metadata),
-        evaluateEventProgress(playerId, "play_match_trio", 1, metadata),
-      ]);
-
-      await Promise.all([
-        safeAddToThread(thread, playerId).catch(() => {}),
-        incrementMatchesPlayed(playerId).catch(() => {}),
-        trackQueueLeaveTimestamp(playerId).catch(() => {}),
-        incrementPlatformUsage(playerId, platform).catch(() => {}),
-      ]);
+      await safeAddToThread(thread, playerId).catch(() => {});
     }
+
     await db.runAsync(
       `UPDATE players SET status = 'active' WHERE id IN (${players
         .map(() => "?")
         .join(",")})`,
       players
     );
+
+    const password = generateMatchPassword();
 
     const buttons = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -310,21 +221,110 @@ async function startMatch(
         .setStyle(ButtonStyle.Danger)
     );
 
+    const instructions = [
+      `🎮 **Match started!**`,
+      `**Players:** ${players.map((id) => `<@${id}>`).join(", ")}`,
+      ``,
+      `__**🎛️ Match Controls**__`,
+      `• 🎤 **Create Voice Channel** — Instantly creates a private VC for your team.`,
+      `• ✅ **Ready Check** — Starts a 3-minute timer. Unready players are kicked and replaced. You can also use \`/ready\`.`,
+      `• 🚪 **Leave Match** — Leave the match. Teammates can replace you via \`/search\`.`,
+      `• ⛔ **End Match** — Calls to end the match. Requires one other match player to confirm. You can also use \`/end\`.`,
+      ``,
+      `__**📌 Tips & Info**__`,
+      `•  This system is **in beta** — expect bugs! **Mention @eldentickethandlers for support.**`,
+      `•  Use \`/search\` to replace players who leave.`,
+      `•  Use \`/status thread\` to view match stats and participants.`,
+      ``,
+      `• 🔐 Suggested Match Password: \`${password}\` *(case-sensitive)*`,
+      `\u200B`, // <-- invisible padding line to ensure space before buttons
+    ];
+
     await thread.send({
-      content: `🎮 **Match started!**\nPlayers: ${players
-        .map((id) => `<@${id}>`)
-        .join(", ")}\n\n**Use the buttons below to manage the match.**`,
+      content: instructions.join("\n"),
       components: [buttons],
     });
 
-    try {
-      await trackNewUniquePartners(players);
-    } catch (err) {
-      logger.errorWrapper("trackNewUniquePartners failed in startMatch", err, {
-        matchId,
-        players,
-      });
-    }
+    // ⏱ Defer heavy achievement + event logic
+    setImmediate(async () => {
+      try {
+        for (const playerId of players) {
+          incrementMatchesPlayed(playerId).catch(() => {});
+          trackQueueLeaveTimestamp(playerId).catch(() => {});
+        }
+        await checkRepeatPartnerAchievements(matchId, formationType, players);
+        await trackNewUniquePartners(players);
+      } catch (err) {
+        logger.errorWrapper(
+          "Deferred match-level achievement tracking failed",
+          err,
+          {
+            matchId,
+            players,
+          }
+        );
+      }
+
+      for (const playerId of players) {
+        try {
+          const partnerIds = players.filter((id) => id !== playerId);
+          const metadata = {
+            formationType,
+            platform,
+            partnerIds,
+            queueType: formationType,
+          };
+
+          const newUniquePartners = await checkNewUniquePartners(
+            playerId,
+            players
+          );
+          await Promise.all([
+            incrementPlatformUsage(playerId, platform).catch(() => {}),
+            checkFormationDiversity(playerId).catch(() => {}),
+            checkPlatformDiversity(playerId).catch(() => {}), // if you add this too
+          ]);
+          if (newUniquePartners > 0)
+            metadata.newUniquePartners = newUniquePartners;
+
+          if (formationType === "duo" && partnerIds.length === 1) {
+            if (await checkRepeatDuo(playerId, partnerIds[0]))
+              metadata.repeatDuo = true;
+          }
+
+          if (formationType === "trio" && partnerIds.length === 2) {
+            if (await checkRepeatTrio(playerId, partnerIds))
+              metadata.repeatTrio = true;
+          }
+
+          await Promise.all([
+            evaluateEventProgress(playerId, "matches_played", 1, metadata),
+            evaluateEventProgress(playerId, "play_match", 1, metadata),
+            evaluateEventProgress(playerId, "play_with_user", 1, metadata),
+            evaluateEventProgress(playerId, "unique_partners", 1, metadata),
+            evaluateEventProgress(playerId, "repeat_duo", 1, metadata),
+            evaluateEventProgress(playerId, "repeat_trio", 1, metadata),
+            evaluateEventProgress(
+              playerId,
+              "solo_stranger_matches",
+              1,
+              metadata
+            ),
+            evaluateEventProgress(playerId, "play_match_duo", 1, metadata),
+            evaluateEventProgress(playerId, "play_match_trio", 1, metadata),
+          ]);
+        } catch (err) {
+          logger.errorWrapper(
+            "Deferred event/achievement tracking per player failed",
+            err,
+            {
+              matchId,
+              playerId,
+            }
+          );
+        }
+      }
+    });
 
     return { matchId, threadId: thread.id, players };
   } catch (error) {

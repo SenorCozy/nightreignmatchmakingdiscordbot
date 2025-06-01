@@ -3,6 +3,9 @@ const logger = require("../logger");
 const {
   unlockAchievementIfNotEarned,
   unlockStatThresholdAchievements,
+  allQueueEntryAchievements,
+  duoQueueAchievements,
+  trioQueueAchievements,
 } = require("../utils/achievementHelpers");
 
 async function incrementBotStatistic(statKey, incrementBy = 1) {
@@ -29,12 +32,6 @@ async function incrementBotStatistic(statKey, incrementBy = 1) {
   }
 }
 
-const {
-  allQueueEntryAchievements,
-  duoQueueAchievements,
-  trioQueueAchievements,
-} = require("../data/achievements");
-
 async function updateQueueStatistics(
   playerId,
   platform,
@@ -51,24 +48,24 @@ async function updateQueueStatistics(
         `INSERT INTO player_statistics (
           id, queue_entries, queue_entries_solo, queue_entries_duo, queue_entries_trio,
           ${platformColumn}
-        ) VALUES (?, 1, ?, ?, ?, 1)
-        ON CONFLICT(id) DO UPDATE SET 
-          queue_entries = queue_entries + 1,
-          queue_entries_solo = queue_entries_solo + ?,
-          queue_entries_duo = queue_entries_duo + ?,
-          queue_entries_trio = queue_entries_trio + ?,
-          ${platformColumn} = ${platformColumn} + 1`,
-        [
-          playerId,
-          soloIncrement,
-          duoIncrement,
-          trioIncrement,
-          soloIncrement,
-          duoIncrement,
-          trioIncrement,
-        ],
+        ) VALUES (?, 0, 0, 0, 0, 0)  -- inserts all 0s if new
+ON CONFLICT(id) DO UPDATE SET 
+  queue_entries = queue_entries + 1,
+  queue_entries_solo = queue_entries_solo + ?,
+  queue_entries_duo = queue_entries_duo + ?,
+  queue_entries_trio = queue_entries_trio + ?,
+  ${platformColumn} = ${platformColumn} + 1
+`,
+        [playerId, soloIncrement, duoIncrement, trioIncrement],
+
         (err) => (err ? reject(err) : resolve())
       );
+    });
+    logger.debug("🎯 queue stat increments", {
+      playerId,
+      soloIncrement,
+      duoIncrement,
+      trioIncrement,
     });
 
     logger.info(
