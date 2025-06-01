@@ -1,8 +1,40 @@
 const { handleDuoQueue } = require("../../utils/queueHandlers");
+const logger = require("../../logger");
 
 module.exports = {
   customId: "duo_yes",
+
   async execute(interaction) {
-    await handleDuoQueue(interaction);
+    const userId = interaction.user.id;
+
+    try {
+      logger.info("🎮 duo_yes triggered", {
+        userId,
+        customId: interaction.customId,
+      });
+
+      await handleDuoQueue(interaction);
+    } catch (error) {
+      logger.errorWrapper("❌ Error in duo_yes button", error, {
+        userId,
+        customId: interaction.customId,
+      });
+
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction
+          .reply({
+            content: "❌ Something went wrong while handling your duo request.",
+            flags: 64,
+          })
+          .catch(() => {});
+      } else {
+        await interaction
+          .followUp({
+            content: "❌ Something went wrong while handling your duo request.",
+            flags: 64,
+          })
+          .catch(() => {});
+      }
+    }
   },
 };

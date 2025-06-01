@@ -3,8 +3,11 @@ const {
   fetchBotStatistics,
   fetchTopPlayers,
   fetchAverageQueueTimes,
+  getAverageMatchTime,
+  fetchTopMvpRecipients,
 } = require("../utils/botstatshelper");
 const db = require("../database");
+const logger = require("../logger");
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -14,15 +17,37 @@ module.exports = {
   async execute(interaction) {
     try {
       const stats = await fetchBotStatistics();
-      if (!stats.length) {
-        return interaction.reply({
-          content: "ℹ️ No bot statistics available.",
-          flags: 64,
-        });
-      }
+      const statMap = Object.fromEntries(
+        stats.map((row) => [row.stat_key, Number(row.stat_value)])
+      );
 
-      const topPlayers = await fetchTopPlayers(20);
-      const avgQueueTimes = await fetchAverageQueueTimes();
+      const [topPlayers, avgQueueTimes] = await Promise.all([
+        fetchTopPlayers(20),
+        fetchAverageQueueTimes(),
+      ]);
+
+      const failedReadyChecks = await db
+        .getAsync(
+          `SELECT SUM(failed_ready_checks) AS total FROM player_statistics`
+        )
+        .then((row) => row?.total || 0)
+        .catch((err) => {
+          logger.errorWrapper("botstats_failed_ready_check_fetch", err);
+          return 0;
+        });
+
+      const globalAvgMatchLength =
+        statMap.total_match_time && statMap.total_matches_created
+          ? (
+              statMap.total_match_time /
+              statMap.total_matches_created /
+              1000
+            ).toFixed(2)
+          : "N/A";
+
+      const longestMatchSeconds = statMap.longest_match_time
+        ? (statMap.longest_match_time / 1000).toFixed(2)
+        : "N/A";
 
       const platforms = ["pc", "xbox", "playstation"];
       const platformQueueTimes = platforms.reduce((acc, platform) => {
@@ -39,66 +64,42 @@ module.exports = {
         return acc;
       }, {});
 
-      const statMap = Object.fromEntries(
-        stats.map((row) => [row.stat_key, row.stat_value])
+      const platformStatsBlock = await Promise.all(
+        platforms.map(async (platform) => {
+          const longest = statMap[`longest_match_time_${platform}`] || 0;
+          const total = statMap[`total_match_time_${platform}`] || 0;
+          const average = await getAverageMatchTime(platform);
+
+          return `  - **${platform.toUpperCase()}**
+    - Matches: ${statMap[`matches_created_${platform}`] || 0}
+    - Avg Queue Time: Solo ${platformQueueTimes[platform].solo.toFixed(
+      2
+    )}s / Duo ${platformQueueTimes[platform].duo.toFixed(2)}s
+    - Avg Match Time: ${(average / 1000).toFixed(2)}s
+    - Longest Match: ${(longest / 1000).toFixed(2)}s
+    - Total Match Time: ${(total / 1000 / 60).toFixed(2)} minutes`;
+        })
       );
 
-      // Get total failed ready checks across all players
-      const failedReadyChecks = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT SUM(failed_ready_checks) AS total FROM player_statistics`,
-          [],
-          (err, row) => {
-            if (err) {
-              console.error("Error fetching failed ready checks:", err.message);
-              return reject(err);
-            }
-            resolve(row?.total || 0);
-          }
-        );
-      });
+      const topPlayerBlock = topPlayers.length
+        ? topPlayers
+            .map(
+              (p, i) =>
+                `${i + 1}. <@${p.id}> — ${p.matches_played} matches ` +
+                `(Solo: ${p.queue_entries_solo || 0}, Duo: ${
+                  p.queue_entries_duo || 0
+                })`
+            )
+            .join("\n")
+        : "No top players found.";
+      const topMvpRecipients = await fetchTopMvpRecipients(10);
+      const mvpBlock = topMvpRecipients.length
+        ? topMvpRecipients
+            .map((p, i) => `${i + 1}. <@${p.id}> — 🏅 ${p.total} MVP awards`)
+            .join("\n")
+        : "No MVP data available.";
 
-      const avgMatchLength =
-        statMap.total_match_time && statMap.total_matches_created
-          ? (
-              statMap.total_match_time /
-              statMap.total_matches_created /
-              1000
-            ).toFixed(2)
-          : "N/A";
-
-      const platformStats = `
-- **Matches Per Platform:**
-  - PC: ${statMap.matches_created_pc || 0}
-  - Xbox: ${statMap.matches_created_xbox || 0}
-  - PlayStation: ${statMap.matches_created_playstation || 0}
-- **Average Queue Times by Platform:**`;
-
-      const queueTimeStats = Object.entries(platformQueueTimes)
-        .map(
-          ([platform, times]) =>
-            `  - **${platform.toUpperCase()}**:\n` +
-            `    - Solo: ${times.solo.toFixed(2)} seconds\n` +
-            `    - Duo: ${times.duo.toFixed(2)} seconds`
-        )
-        .join("\n");
-
-      const topPlayerStats =
-        topPlayers.length > 0
-          ? topPlayers
-              .map(
-                (player, index) =>
-                  `${index + 1}. <@${player.id}> — ${
-                    player.matches_played
-                  } matches ` +
-                  `(Solo: ${player.queue_entries_solo || 0}, Duo: ${
-                    player.queue_entries_duo || 0
-                  })`
-              )
-              .join("\n")
-          : "No top players found.";
-
-      const response = `
+      const content = `
 **📊 Bot Statistics**
 - **Unique Users:** ${statMap.unique_users || 0}
 - **Total Queue Entries:** ${statMap.total_queue_entries || 0}
@@ -106,27 +107,23 @@ module.exports = {
   - Duo: ${statMap.queue_entries_duo || 0}
 - **Total Matches Created:** ${statMap.total_matches_created || 0}
 - **Failed Ready Checks:** ${failedReadyChecks}
-- **Average Match Length:** ${avgMatchLength} seconds
-- **Longest Match Length:** ${
-        statMap.longest_match_time
-          ? (statMap.longest_match_time / 1000).toFixed(2)
-          : "N/A"
-      } seconds
+- **Average Match Length (Global):** ${globalAvgMatchLength} seconds
+- **Longest Match Duration (Global):** ${longestMatchSeconds} seconds
 
-
-${platformStats}
-${queueTimeStats}
+**📈 Per-Platform Stats**
+${platformStatsBlock.join("\n")}
 
 **🏆 Top 20 Players**
-${topPlayerStats}
+${topPlayerBlock}
+
+**💰 Top 10 MVP Recipients**
+${mvpBlock}
 `;
 
-      return interaction.reply({
-        content: response,
-        flags: 64,
-      });
+      logger.info("✅ Bot statistics displayed successfully.");
+      return interaction.reply({ content, flags: 64 });
     } catch (error) {
-      console.error("❌ Error in /botstats:", error);
+      logger.errorWrapper("❌ Error in /botstats command", error);
       return interaction.reply({
         content: "❌ An error occurred while fetching bot statistics.",
         flags: 64,

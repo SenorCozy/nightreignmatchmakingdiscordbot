@@ -1,119 +1,200 @@
-const { PermissionFlagsBits, ComponentType } = require("discord.js");
+const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType,
+} = require("discord.js");
 const db = require("../../database");
-
-const { cleanupMatch } = require("../../utils/matchmakingUtils/matchUtils");
+const logger = require("../../logger");
+const {
+  cleanupMatch,
+  safeSend,
+} = require("../../utils/matchmakingUtils/matchUtils");
 const { hasModRole } = require("../../utils/permissions");
+const {
+  activeMatchEndVotes,
+  matchEndCollectors,
+} = require("../../utils/matchVoteState");
 
 module.exports = {
   customId: "end_match",
+
   async execute(interaction) {
     const thread = interaction.channel;
+    const userId = interaction.user.id;
+
+    if (!thread?.isThread()) {
+      return interaction.reply({
+        content: "❌ This button must be used in a match thread.",
+        flags: 64,
+      });
+    }
 
     try {
-      const dbResult = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT playerIds, voiceChannelId FROM channels WHERE threadId = ?`,
-          [thread.id],
-          (err, row) => {
-            if (err) return reject(err);
-            resolve(row);
-          }
-        );
-      });
+      const { voiceChannelId } = await db.getAsync(
+        `SELECT voiceChannelId FROM channels WHERE threadId = ?`,
+        [thread.id]
+      );
 
-      if (!dbResult) {
+      const activePlayers = await db
+        .allAsync(
+          `SELECT playerId FROM match_players WHERE threadId = ? AND status = 'active'`,
+          [thread.id]
+        )
+        .then((rows) => rows.map((r) => r.playerId));
+
+      if (!activePlayers.includes(userId)) {
         return interaction.reply({
-          content: "❌ No match found in the database for this thread.",
+          content: "❌ You are not an active player in this match.",
           flags: 64,
         });
       }
 
-      const { voiceChannelId } = dbResult;
-
-      const playerList = await new Promise((resolve, reject) => {
-        db.all(
-          `SELECT playerId FROM match_players WHERE threadId = ? AND status = 'active'`,
-          [thread.id],
-          (err, rows) =>
-            err ? reject(err) : resolve(rows.map((r) => r.playerId))
-        );
-      });
-
-      // ✅ Instant End if Moderator
       if (hasModRole(interaction.member)) {
-        const stillExists = await thread.guild.channels
-          .fetch(thread.id)
-          .catch(() => null);
-        if (!stillExists) return;
-
+        await interaction.deferUpdate();
+        logger.info("🛡️ Moderator override via button", {
+          threadId: thread.id,
+          user: interaction.user.tag,
+        });
+        await safeSend(
+          thread,
+          "✅ Match will end shortly (moderator override)..."
+        );
         await cleanupMatch({
           thread,
           voiceChannelId,
           closedByUserOrBot: interaction.user,
-          closureReason: "Ended by moderator via vote bypass",
+          closureReason: "Ended by moderator via button",
         });
-
+        activeMatchEndVotes.delete(thread.id);
+        matchEndCollectors.delete(thread.id);
         return;
       }
 
-      // ✅ Player Voting
-      const collectedUsers = new Set();
+      if (activeMatchEndVotes.has(thread.id)) {
+        const voteSet = activeMatchEndVotes.get(thread.id);
+        if (voteSet.has(userId)) {
+          return interaction.reply({
+            content: "✅ You’ve already voted. Waiting for others.",
+            flags: 64,
+          });
+        }
+
+        voteSet.add(userId);
+        logger.info("🗳️ Existing vote updated", {
+          threadId: thread.id,
+          currentVotes: [...voteSet],
+        });
+
+        return interaction.reply({
+          content: `📝 A vote is already in progress. You’ve been added. (${voteSet.size}/2 confirmed)`,
+          flags: 64,
+        });
+      }
+
+      const voteSet = new Set([userId]);
+      activeMatchEndVotes.set(thread.id, voteSet);
+
+      if (matchEndCollectors.has(thread.id)) {
+        matchEndCollectors.get(thread.id).stop("replaced");
+      }
+
+      await safeSend(
+        thread,
+        `📣 <@${userId}> has requested to end the match. Click the button below to confirm.`
+      );
+
+      await interaction.reply({
+        content: `🗳️ Vote started by <@${userId}>. One more player must confirm within 60 seconds.`,
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId("confirm_end_match_button")
+              .setLabel("Confirm Match End")
+              .setStyle(ButtonStyle.Danger)
+          ),
+        ],
+      });
+
       const collector = thread.createMessageComponentCollector({
         componentType: ComponentType.Button,
         time: 60000,
+        filter: (btn) =>
+          btn.customId === "confirm_end_match_button" &&
+          activeMatchEndVotes.has(thread.id) &&
+          activePlayers.includes(btn.user.id),
       });
 
-      await interaction.reply({
-        content: "🗳️ Vote started: 2 players must confirm to end the match.",
-        flags: 64,
-      });
+      matchEndCollectors.set(thread.id, collector);
 
-      collector.on("collect", async (btnInt) => {
-        if (!playerList.includes(btnInt.user.id)) {
-          return btnInt
-            .reply({
-              content: "🚫 You are not part of this match.",
-              flags: 64,
-            })
-            .catch(() => {});
+      collector.on("collect", async (btn) => {
+        if (btn.customId !== "confirm_end_match_button") return;
+
+        if (!activePlayers.includes(btn.user.id)) {
+          return btn.reply({
+            content: "❌ You are not a valid participant.",
+            flags: 64,
+          });
         }
 
-        collectedUsers.add(btnInt.user.id);
+        const currentVotes = activeMatchEndVotes.get(thread.id);
+        if (!currentVotes) {
+          return btn.reply({
+            content: "⚠️ This vote has already ended or is no longer valid.",
+            flags: 64,
+          });
+        }
 
-        if (collectedUsers.size >= 2) {
-          collector.stop();
+        if (currentVotes.has(btn.user.id)) {
+          return btn.reply({
+            content: "✅ You already confirmed.",
+            flags: 64,
+          });
+        }
 
+        currentVotes.add(btn.user.id);
+        await btn.deferUpdate();
+
+        await safeSend(
+          thread,
+          `🔔 Vote confirmed by <@${btn.user.id}> (${currentVotes.size}/2)`
+        );
+
+        if (currentVotes.size >= 2) {
+          collector.stop("success");
+          await safeSend(thread, "✅ Vote passed. Match ending...");
           await cleanupMatch({
             thread,
             voiceChannelId,
-            closedByUserOrBot: btnInt.user,
-            closureReason: "Match ended by player vote",
+            closedByUserOrBot: btn.user,
+            closureReason: "Match ended by player vote (button)",
           });
-        } else {
-          return btnInt
-            .reply({
-              content: `✅ Confirmed. Waiting for one more player. (${collectedUsers.size}/2)`,
-              flags: 64,
-            })
-            .catch(() => {});
+          activeMatchEndVotes.delete(thread.id);
+          matchEndCollectors.delete(thread.id);
         }
       });
 
-      collector.on("end", async () => {
-        if (collectedUsers.size < 2) {
-          await thread
-            .send("❌ Match vote expired without enough confirmations.")
-            .catch(() => {});
+      collector.on("end", async (_, reason) => {
+        if (reason === "success") return;
+        if (activeMatchEndVotes.has(thread.id)) {
+          activeMatchEndVotes.delete(thread.id);
+          matchEndCollectors.delete(thread.id);
+          await safeSend(
+            thread,
+            "❌ Match end vote expired due to lack of confirmations."
+          );
         }
       });
     } catch (err) {
-      console.error("❌ Error handling end_match:", err.message);
-      return interaction
-        .reply({
-          content: "❌ Something went wrong while ending the match.",
-          flags: 64,
-        })
-        .catch(() => {});
+      logger.errorWrapper("end_match_button", err, {
+        threadId: thread.id,
+        userId,
+      });
+
+      return interaction.reply({
+        content: "❌ Something went wrong while ending the match.",
+        flags: 64,
+      });
     }
   },
 };

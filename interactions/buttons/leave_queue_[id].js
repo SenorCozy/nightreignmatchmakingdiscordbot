@@ -1,91 +1,150 @@
 const db = require("../../database");
-const sendDuoLeavePrompt = require("../../utils/sendDuoLeavePrompt");
+const logger = require("../../logger");
+const sendQueueStatusPrompt = require("../../utils/sendQueueStatusPrompt");
+const {
+  unlockAchievementIfNotEarned,
+} = require("../../utils/achievementHelpers");
 
 module.exports = {
   customIdRegex: /^leave_queue_\d+$/,
 
   async execute(interaction) {
     const partnerId = interaction.customId.replace("leave_queue_", "");
+    const userId = interaction.user.id;
 
-    if (interaction.user.id !== partnerId) {
-      return interaction.reply({
-        content: "❌ This button is not meant for you.",
-        flags: 64,
-      });
+    if (userId !== partnerId) {
+      return interaction
+        .reply({
+          content: "❌ This button is not meant for you.",
+          flags: 64,
+        })
+        .catch((err) =>
+          logger.warn("⚠️ Failed to send unauthorized button warning", {
+            userId,
+            error: err.message,
+          })
+        );
     }
 
-    await interaction.deferUpdate(); // Acknowledge early to prevent timeout
+    await interaction.deferUpdate().catch((err) =>
+      logger.warn("⚠️ Failed to defer leave_queue interaction", {
+        userId,
+        error: err.message,
+      })
+    );
 
     try {
-      // Fetch the player
-      const player = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT * FROM players WHERE id = ? AND status = 'queued'`,
-          [partnerId],
-          (err, row) => (err ? reject(err) : resolve(row))
-        );
-      });
+      const player = await db.getAsync(`SELECT * FROM players WHERE id = ?`, [
+        partnerId,
+      ]);
 
-      if (!player) {
-        return interaction.followUp({
-          content: "⚠️ You're no longer in the queue — nothing to do.",
-          flags: 64,
-        });
+      if (!player || player.status !== "queued") {
+        return interaction
+          .followUp({
+            content: "⚠️ You're no longer in the queue — nothing to do.",
+            flags: 64,
+          })
+          .catch((err) =>
+            logger.warn("⚠️ Failed to send not-in-queue notice", {
+              userId,
+              error: err.message,
+            })
+          );
       }
 
-      // ✅ Clear duo if applicable
+      const guild = interaction.guild;
+
+      // ✅ Handle active trio association
+      const activeTrio = await db.getAsync(
+        `SELECT * FROM trio_partner_groups 
+         WHERE active = 1 AND (player1_id = ? OR player2_id = ? OR player3_id = ?)`,
+        [partnerId, partnerId, partnerId]
+      );
+
+      if (activeTrio) {
+        const trioIds = [
+          activeTrio.player1_id,
+          activeTrio.player2_id,
+          activeTrio.player3_id,
+        ];
+        const remaining = trioIds.filter((id) => id !== partnerId);
+
+        // Mark trio inactive
+        await db.runAsync(
+          `UPDATE trio_partner_groups SET active = 0 WHERE trio_id = ?`,
+          [activeTrio.trio_id]
+        );
+
+        logger.info("🧯 Trio disbanded via leave_queue", {
+          trio_id: activeTrio.trio_id,
+          leaver: partnerId,
+        });
+
+        for (const otherId of remaining) {
+          await db.runAsync(
+            `UPDATE players SET duoPartner = NULL WHERE id = ?`,
+            [otherId]
+          );
+          await sendQueueStatusPrompt(guild, otherId, "trio");
+        }
+        await unlockAchievementIfNotEarned(partnerId, "leave_trio");
+      }
+
+      // ✅ Handle duo unlink
       if (player.duoPartner) {
         const duoPartnerId = player.duoPartner;
 
-        await new Promise((resolve, reject) => {
-          db.run(
-            `UPDATE players SET duoPartner = NULL WHERE id = ? OR id = ?`,
-            [partnerId, duoPartnerId],
-            (err) => (err ? reject(err) : resolve())
-          );
+        await db.runAsync(
+          `UPDATE players SET duoPartner = NULL WHERE id IN (?, ?)`,
+          [partnerId, duoPartnerId]
+        );
+
+        logger.info("🔗 Duo unlinked via leave_queue", {
+          playerId: partnerId,
+          partnerId: duoPartnerId,
         });
 
-        console.info(
-          `Duo partnership cleared for ${partnerId} and ${duoPartnerId}`
-        );
-
-        // ✅ Notify the former partner
-        await sendDuoLeavePrompt(interaction.guild, duoPartnerId);
+        await sendQueueStatusPrompt(guild, duoPartnerId, "duo");
+        await unlockAchievementIfNotEarned(partnerId, "leave_duo");
       }
 
-      // ✅ Remove player from queue
-      const removed = await new Promise((resolve, reject) => {
-        db.run(
-          `DELETE FROM players WHERE id = ? AND status = 'queued'`,
-          [partnerId],
-          function (err) {
-            if (err) return reject(err);
-            resolve(this.changes);
-          }
-        );
+      // ✅ Mark player as left
+      await db.runAsync(
+        `UPDATE players SET status = 'left', last_queue_exit_at = ? WHERE id = ?`,
+        [Date.now(), partnerId]
+      );
+
+      logger.info("✅ Player left queue via leave_queue", {
+        playerId: partnerId,
       });
 
-      if (removed === 0) {
-        return interaction.followUp({
-          content:
-            "⚠️ You were not removed. Please try again or contact a mod.",
+      return interaction
+        .followUp({
+          content: "✅ You have successfully left the queue.",
           flags: 64,
-        });
-      }
-
-      return interaction.followUp({
-        content: "✅ You have successfully left the queue.",
-        flags: 64,
-      });
+        })
+        .catch((err) =>
+          logger.warn("⚠️ Failed to confirm queue departure", {
+            userId,
+            error: err.message,
+          })
+        );
     } catch (error) {
-      console.error("Error handling leave_queue_<id> button:", error.message);
+      logger.errorWrapper("❌ Error handling leave_queue_<id>", error, {
+        userId,
+        partnerId,
+      });
+
       try {
-        return interaction.followUp({
+        await interaction.followUp({
           content: "❌ An error occurred while leaving the queue.",
           flags: 64,
         });
       } catch (fallbackErr) {
-        console.error("❌ Failed to send followUp:", fallbackErr.message);
+        logger.warn("❌ Failed to send queue error fallback", {
+          userId,
+          error: fallbackErr.message,
+        });
       }
     }
   },

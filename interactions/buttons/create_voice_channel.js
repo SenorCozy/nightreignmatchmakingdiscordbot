@@ -1,23 +1,29 @@
 const { ChannelType, PermissionsBitField } = require("discord.js");
 const db = require("../../database");
+const logger = require("../../logger");
+const { safeSend } = require("../../utils/matchmakingUtils/matchUtils");
 
 module.exports = {
   customId: "create_voice_channel",
 
   async execute(interaction) {
     const thread = interaction.channel;
+    const threadId = thread.id;
+    const guildId = thread.guild.id;
 
     try {
       await interaction.deferReply({ flags: 64 }).catch((err) => {
-        console.warn("⚠️ Failed to defer interaction reply:", err);
+        logger.warn("⚠️ Failed to defer interaction reply", {
+          error: err.message,
+        });
       });
 
-      // 🟦 Fetch match_id and check for existing VC
+      // 🔍 Fetch match data
       const { match_id, voiceChannelId } = await new Promise(
         (resolve, reject) => {
           db.get(
             `SELECT match_id, voiceChannelId FROM channels WHERE threadId = ?`,
-            [thread.id],
+            [threadId],
             (err, row) => (err ? reject(err) : resolve(row || {}))
           );
         }
@@ -26,9 +32,7 @@ module.exports = {
       if (!match_id) {
         return interaction
           .editReply({ content: "❌ No match found for this thread." })
-          .catch((err) =>
-            console.warn("⚠️ Failed to reply: no match found", err)
-          );
+          .catch(() => {});
       }
 
       if (voiceChannelId) {
@@ -36,10 +40,10 @@ module.exports = {
           .editReply({
             content: "⚠️ A voice channel already exists for this match.",
           })
-          .catch((err) => console.warn("⚠️ Failed to reply: VC exists", err));
+          .catch(() => {});
       }
 
-      // 🟦 Get active players
+      // 🔍 Get active players
       const activePlayers = await new Promise((resolve, reject) => {
         db.all(
           `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
@@ -51,14 +55,11 @@ module.exports = {
 
       if (!activePlayers.length) {
         return interaction
-          .editReply({
-            content: "❌ No active players found for this match.",
-          })
-          .catch((err) =>
-            console.warn("⚠️ Failed to reply: no active players", err)
-          );
+          .editReply({ content: "❌ No active players found for this match." })
+          .catch(() => {});
       }
 
+      // 🔍 Validate parent categories
       const parentChannel = thread?.parent;
       const parentCategory = parentChannel?.parent;
 
@@ -68,11 +69,10 @@ module.exports = {
             content:
               "❌ Unable to determine the parent category for this thread.",
           })
-          .catch((err) =>
-            console.warn("⚠️ Failed to reply: no parent category", err)
-          );
+          .catch(() => {});
       }
 
+      // 🔍 Server channel limit check
       const fetchedChannels = await interaction.guild.channels.fetch();
       if (fetchedChannels.size >= 500) {
         return interaction
@@ -80,12 +80,10 @@ module.exports = {
             content:
               "⚠️ Cannot create a voice channel. Server channel limit (500) reached.",
           })
-          .catch((err) =>
-            console.warn("⚠️ Failed to reply: limit reached", err)
-          );
+          .catch(() => {});
       }
 
-      // 🟦 Prepare permissions
+      // 🔐 Permissions
       const moderatorRoleIds = [
         process.env.TICKET_HANDLER_ROLE,
         process.env.ELDEN_MODERATOR_ROLE,
@@ -95,7 +93,6 @@ module.exports = {
 
       let voiceChannel;
       try {
-        // 🟩 Attempt to create the VC
         voiceChannel = await interaction.guild.channels.create({
           name: `match-voice-${activePlayers.join("-")}`,
           type: ChannelType.GuildVoice,
@@ -133,36 +130,40 @@ module.exports = {
           err.code === 30013
             ? "⚠️ Cannot create voice channel: server has reached the max channel limit (500)."
             : "❌ Unexpected error creating voice channel.";
-        console.error("❌ Voice channel creation failed:", err);
-        return interaction
-          .editReply({ content: msg })
-          .catch((e) => console.warn("⚠️ Failed to reply after VC error:", e));
+        logger.errorWrapper("❌ Failed to create voice channel", err, {
+          match_id,
+          guildId,
+        });
+        return interaction.editReply({ content: msg }).catch(() => {});
       }
 
-      console.info(`✅ Voice channel created: ${voiceChannel.name}`);
+      logger.info("✅ Voice channel created", {
+        match_id,
+        voiceChannelId: voiceChannel.id,
+        name: voiceChannel.name,
+      });
 
+      // 💾 Save to DB
       db.run(
         `UPDATE channels SET voiceChannelId = ? WHERE threadId = ?`,
-        [voiceChannel.id, thread.id],
+        [voiceChannel.id, threadId],
         (err) => {
           if (err) {
-            console.error(
-              "❌ Failed to store voiceChannelId in DB:",
-              err.message
+            logger.errorWrapper(
+              "❌ Failed to store voiceChannelId in DB",
+              err,
+              { match_id, threadId }
             );
           } else {
-            console.log("📦 Stored voiceChannelId in DB:", voiceChannel.id);
+            logger.info("📦 Stored voiceChannelId in DB", {
+              voiceChannelId: voiceChannel.id,
+            });
           }
         }
       );
-
-      await thread
-        .send({
-          content: `🎤 A private voice channel has been created for this match!\n👉 [Click here to Join Voice](https://discord.com/channels/${thread.guild.id}/${voiceChannel.id})`,
-        })
-        .catch((err) => {
-          console.warn("⚠️ Failed to send message to thread:", err);
-        });
+      await safeSend(thread, {
+        content: `🎤 A private voice channel has been created for this match!\n👉 [Click to Join](https://discord.com/channels/${guildId}/${voiceChannel.id})`,
+      });
 
       await interaction
         .followUp({
@@ -170,21 +171,22 @@ module.exports = {
           flags: 64,
         })
         .catch((err) => {
-          console.warn("⚠️ Failed to follow up interaction:", err);
+          logger.warn("⚠️ Failed to follow up after VC creation", {
+            error: err.message,
+          });
         });
     } catch (error) {
-      console.error(
-        "❌ Uncaught error in create_voice_channel handler:",
-        error
-      );
-      interaction
+      logger.errorWrapper("❌ Uncaught error in create_voice_channel", error, {
+        threadId,
+        userId: interaction.user.id,
+      });
+
+      await interaction
         .editReply({
           content:
             "❌ Failed to create the voice channel due to an unexpected error.",
         })
-        .catch((err) =>
-          console.warn("⚠️ Failed to send final error message:", err)
-        );
+        .catch(() => {});
     }
   },
 };

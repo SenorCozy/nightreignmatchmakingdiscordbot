@@ -1,5 +1,9 @@
 const db = require("../database");
 const logger = require("../logger");
+const {
+  unlockAchievementIfNotEarned,
+  unlockStatThresholdAchievements,
+} = require("../utils/achievementHelpers");
 
 async function incrementBotStatistic(statKey, incrementBy = 1) {
   try {
@@ -25,47 +29,71 @@ async function incrementBotStatistic(statKey, incrementBy = 1) {
   }
 }
 
-async function updateQueueStatistics(playerId, platform, isSolo) {
-  const soloIncrement = isSolo ? 1 : 0;
-  const duoIncrement = isSolo ? 0 : 1;
+const {
+  allQueueEntryAchievements,
+  duoQueueAchievements,
+  trioQueueAchievements,
+} = require("../data/achievements");
+
+async function updateQueueStatistics(
+  playerId,
+  platform,
+  formationType = "solo"
+) {
+  const soloIncrement = formationType === "solo" ? 1 : 0;
+  const duoIncrement = formationType === "duo" ? 1 : 0;
+  const trioIncrement = formationType === "trio" ? 1 : 0;
+  const platformColumn = `platform_usage_${platform}`;
 
   try {
     await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO player_statistics (id, queue_entries, queue_entries_solo, queue_entries_duo, top_platform)
-         VALUES (?, 1, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET 
-           queue_entries = queue_entries + 1,
-           queue_entries_solo = queue_entries_solo + ?,
-           queue_entries_duo = queue_entries_duo + ?,
-           top_platform = CASE 
-             WHEN top_platform = ? THEN top_platform
-             ELSE ?
-           END`,
+        `INSERT INTO player_statistics (
+          id, queue_entries, queue_entries_solo, queue_entries_duo, queue_entries_trio,
+          ${platformColumn}
+        ) VALUES (?, 1, ?, ?, ?, 1)
+        ON CONFLICT(id) DO UPDATE SET 
+          queue_entries = queue_entries + 1,
+          queue_entries_solo = queue_entries_solo + ?,
+          queue_entries_duo = queue_entries_duo + ?,
+          queue_entries_trio = queue_entries_trio + ?,
+          ${platformColumn} = ${platformColumn} + 1`,
         [
           playerId,
           soloIncrement,
           duoIncrement,
-          platform,
+          trioIncrement,
           soloIncrement,
           duoIncrement,
-          platform,
-          platform,
+          trioIncrement,
         ],
-        (err) => {
-          if (err) {
-            logger.errorWrapper("UpdateQueueStats_DB", err, {
-              playerId,
-              platform,
-            });
-            return reject(err);
-          }
-          resolve();
-        }
+        (err) => (err ? reject(err) : resolve())
       );
     });
 
-    logger.info(`📊 Updated queue statistics for ${playerId}`);
+    logger.info(
+      `📊 Updated queue statistics for ${playerId} (${formationType})`
+    );
+
+    await unlockStatThresholdAchievements(
+      playerId,
+      "queue_entries",
+      allQueueEntryAchievements
+    );
+
+    if (formationType === "duo") {
+      await unlockStatThresholdAchievements(
+        playerId,
+        "queue_entries_duo",
+        duoQueueAchievements
+      );
+    } else if (formationType === "trio") {
+      await unlockStatThresholdAchievements(
+        playerId,
+        "queue_entries_trio",
+        trioQueueAchievements
+      );
+    }
   } catch (error) {
     logger.errorWrapper("UpdateQueueStatistics", error, { playerId });
   }
@@ -88,16 +116,33 @@ async function trackUniqueUser(userId) {
     });
 
     if (!isTracked) {
+      // 1. Add to player_statistics
+      await new Promise((resolve, reject) => {
+        db.run(
+          `INSERT INTO player_statistics (id) VALUES (?)`,
+          [userId],
+          (err) => {
+            if (err) {
+              logger.errorWrapper("TrackUser_Insert_StatTable", err, {
+                userId,
+              });
+              return reject(err);
+            }
+            resolve();
+          }
+        );
+      });
+
+      // 2. Increment unique_users stat
       await new Promise((resolve, reject) => {
         db.run(
           `INSERT INTO bot_statistics (stat_key, stat_value)
            VALUES ('unique_users', 1)
-           ON CONFLICT(stat_key) DO UPDATE SET 
-             stat_value = stat_value + 1`,
+           ON CONFLICT(stat_key) DO UPDATE SET stat_value = stat_value + 1`,
           [],
           (err) => {
             if (err) {
-              logger.errorWrapper("TrackUser_Insert", err, { userId });
+              logger.errorWrapper("TrackUser_Insert_Unique", err, { userId });
               return reject(err);
             }
             resolve();

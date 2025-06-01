@@ -1,4 +1,5 @@
 const db = require("../../database");
+const logger = require("../../logger");
 
 async function loadMatchmakingSettings() {
   try {
@@ -20,9 +21,14 @@ async function loadMatchmakingSettings() {
       );
     });
 
+    logger.info("✅ Matchmaking settings loaded", {
+      matchmakingPaused,
+      matchmakingInterval,
+    });
+
     return { matchmakingPaused, matchmakingInterval };
   } catch (error) {
-    logger.error("❌ Error loading matchmaking settings:", error.message);
+    logger.errorWrapper("❌ Error loading matchmaking settings", error);
     return { matchmakingPaused: false, matchmakingInterval: 10000 };
   }
 }

@@ -1,7 +1,10 @@
 // utils/globalState.js
-const db = require("../database");
+const logger = require("../logger");
+
+// Initialize a global variable for player platform selections if not already present
 if (!global.playerPlatformSelection) {
   global.playerPlatformSelection = {};
+  logger.debug("Initialized global.playerPlatformSelection");
 }
 
 module.exports = {

@@ -1,37 +1,42 @@
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 const db = require("../../database");
+const logger = require("../../logger");
 
 const { removePlayerFromMatch } = require("../../utils/playerUtils");
-const { cleanupMatch } = require("../../utils/matchmakingUtils/matchUtils");
 const {
-  addToPlayerMatchTime,
-  trackLongestMatchTime,
-  addToTotalMatchTime,
-} = require("../../utils/playerstatshelper");
+  cleanupMatch,
+  safeSend,
+} = require("../../utils/matchmakingUtils/matchUtils");
 
 module.exports = {
   customId: "leave_match",
-  async execute(interaction) {
-    try {
-      const thread = interaction.channel;
-      const userId = interaction.user.id;
 
-      if (!thread?.isThread()) {
-        return interaction.reply({
+  async execute(interaction) {
+    const thread = interaction.channel;
+    const userId = interaction.user.id;
+
+    if (!thread?.isThread()) {
+      return interaction
+        .reply({
           content: "❌ This must be used inside a match thread.",
           flags: 64,
-        });
-      }
+        })
+        .catch(() => {});
+    }
 
-      await interaction.deferReply({ flags: 64 }).catch(() => {});
+    await interaction.deferReply({ flags: 64 }).catch((err) =>
+      logger.warn("⚠️ Failed to defer leave_match interaction", {
+        userId,
+        threadId: thread.id,
+        error: err.message,
+      })
+    );
 
-      const matchData = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT match_id, playerIds, voiceChannelId FROM channels WHERE threadId = ?`,
-          [thread.id],
-          (err, row) => (err ? reject(err) : resolve(row))
-        );
-      });
+    try {
+      const matchData = await db.getAsync(
+        `SELECT match_id, voiceChannelId FROM channels WHERE threadId = ?`,
+        [thread.id]
+      );
 
       if (!matchData) {
         return interaction.editReply({
@@ -39,131 +44,50 @@ module.exports = {
         });
       }
 
-      const { match_id, playerIds, voiceChannelId } = matchData;
+      const { match_id, voiceChannelId } = matchData;
 
-      const playerList = playerIds.split(",").filter(Boolean);
-      if (!playerList.includes(userId)) {
+      const playerRow = await db.getAsync(
+        `SELECT status, leave_in_progress FROM match_players WHERE match_id = ? AND playerId = ?`,
+        [match_id, userId]
+      );
+
+      if (!playerRow || playerRow.status !== "active") {
         return interaction.editReply({
           content: "❌ You are not part of this match.",
         });
       }
 
-      // ✅ Check for leave_in_progress
-      const inProgress = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT leave_in_progress FROM match_players WHERE match_id = ? AND playerId = ?`,
-          [match_id, userId],
-          (err, row) =>
-            err ? reject(err) : resolve(row?.leave_in_progress === 1)
-        );
-      });
-
-      if (inProgress) {
+      if (playerRow.leave_in_progress === 1) {
         return interaction.editReply({
           content: "⚠️ You're already being removed from this match.",
         });
       }
 
-      // ✅ Set leave_in_progress = 1
-      await db.run(
+      await db.runAsync(
         `UPDATE match_players SET leave_in_progress = 1 WHERE match_id = ? AND playerId = ?`,
         [match_id, userId]
       );
 
-      // ✅ Match time tracking
-      const queueEnteredAt = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT queue_entered_at FROM player_statistics WHERE id = ?`,
-          [userId],
-          (err, row) =>
-            err ? reject(err) : resolve(row?.queue_entered_at || null)
-        );
-      });
+      await removePlayerFromMatch(userId, thread.id, "left_match");
 
-      if (queueEnteredAt) {
-        const matchDuration = Date.now() - queueEnteredAt;
-        await Promise.all([
-          addToPlayerMatchTime(userId, matchDuration),
-          trackLongestMatchTime(userId, matchDuration),
-          addToTotalMatchTime(matchDuration),
-        ]).catch((err) =>
-          console.warn("⚠️ Failed to update match duration stats:", err.message)
-        );
-      }
-
-      // ✅ Mark player as removed
-      await db.run(
-        `UPDATE match_players SET status = 'removed' WHERE match_id = ? AND playerId = ?`,
-        [match_id, userId]
+      const remaining = await db.getAsync(
+        `SELECT COUNT(*) AS count FROM match_players WHERE match_id = ? AND status = 'active'`,
+        [match_id]
       );
 
-      // ✅ Log leave event with final_status
-      await db.run(
-        `INSERT INTO match_events (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
-   VALUES (?, ?, ?, 'leave', ?, ?, ?)`,
-        [
-          match_id,
-          thread.id,
-          userId,
-          Date.now(),
-          "Player used leave_match button",
-          "left_match",
-        ]
-      );
-
-      // ✅ Update playerIds in channels
-      const updatedPlayerIds = playerList.filter((id) => id !== userId);
-      await db.run(`UPDATE channels SET playerIds = ? WHERE threadId = ?`, [
-        updatedPlayerIds.join(","),
-        thread.id,
-      ]);
-
-      // ✅ Reset player queue status
-      await removePlayerFromMatch(userId, thread.id);
-
-      // ✅ Remove from thread and VC
-      await thread.members.remove(userId).catch(() => {});
-
-      if (voiceChannelId) {
-        const vc = thread.guild.channels.cache.get(voiceChannelId);
-        if (vc) {
-          await vc.permissionOverwrites
-            .edit(userId, {
-              ViewChannel: false,
-              Connect: false,
-              Speak: false,
-            })
-            .catch(() => {});
-          await vc.members
-            .get(userId)
-            ?.voice.disconnect()
-            .catch(() => {});
-        }
-      }
-
-      // ✅ Reset leave_in_progress
-      await db.run(
-        `UPDATE match_players SET leave_in_progress = 0 WHERE match_id = ? AND playerId = ?`,
-        [match_id, userId]
-      );
-
-      // ✅ Check for cleanup
-      const remaining = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT COUNT(*) AS count FROM match_players 
-           WHERE match_id = ? AND status = 'active'`,
-          [match_id],
-          (err, row) => (err ? reject(err) : resolve(row.count || 0))
-        );
-      });
-
-      if (remaining === 0) {
+      if ((remaining?.count || 0) === 0) {
         await cleanupMatch({ thread, voiceChannelId });
         return;
       }
 
-      // ✅ Notify remaining players
-      const actionRow = new ActionRowBuilder().addComponents(
+      const updatedPlayerIds = await db
+        .allAsync(
+          `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
+          [match_id]
+        )
+        .then((rows) => rows.map((r) => r.playerId));
+
+      const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId("end_match_now")
           .setLabel("End Match Immediately")
@@ -174,18 +98,21 @@ module.exports = {
           .setStyle(ButtonStyle.Primary)
       );
 
-      await thread.send({
-        content: `⚠️ <@${updatedPlayerIds.join(
-          ">, <@"
-        )}>: A player has left the match.\nWould you like to end the match or search for a replacement?`,
-        components: [actionRow],
+      await safeSend(thread, {
+        content: `⚠️ <@${updatedPlayerIds.join(">, <@")}>
+A player has left the match. Would you like to end the match or search for a replacement?`,
+        components: [row],
       });
 
       return interaction.editReply({
         content: "✅ You have successfully left the match.",
       });
     } catch (error) {
-      console.error("❌ Error handling leave_match button:", error.message);
+      logger.errorWrapper("❌ Error handling leave_match", error, {
+        userId,
+        threadId: interaction.channel?.id,
+      });
+
       return interaction.editReply({
         content: "❌ Something went wrong trying to leave the match.",
       });

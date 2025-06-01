@@ -6,6 +6,7 @@ const {
   ComponentType,
 } = require("discord.js");
 const db = require("../database");
+const logger = require("../logger");
 
 const { hasModRole } = require("../utils/permissions");
 const {
@@ -58,15 +59,21 @@ module.exports = {
         });
       }
 
-      await btnInteraction.reply("🧹 Nuking in progress...");
-
       try {
+        await btnInteraction.reply("🧹 Nuking in progress...");
+
         await deleteBotThreadsAndVoiceChannels(interaction.guild);
         await clearDatabaseTables();
 
-        console.info("✅ /nuke completed successfully.");
+        logger.info("✅ /nuke executed successfully by", {
+          user: btnInteraction.user.tag,
+          userId: btnInteraction.user.id,
+        });
       } catch (err) {
-        console.error("❌ Error during /nuke:", err);
+        logger.errorWrapper("❌ Error during /nuke execution", err, {
+          triggeredBy: btnInteraction.user.id,
+        });
+
         await interaction.channel.send(
           "❌ An error occurred during the nuke process. Please check logs."
         );
@@ -77,7 +84,11 @@ module.exports = {
       if (collected.size === 0) {
         interaction.channel
           .send("⌛ Nuke confirmation timed out. No action was taken.")
-          .catch(() => {});
+          .catch((err) =>
+            logger.warn("⚠️ Failed to send nuke timeout message", {
+              error: err,
+            })
+          );
       }
     });
   },

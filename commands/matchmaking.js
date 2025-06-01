@@ -1,6 +1,7 @@
 const { SlashCommandBuilder } = require("discord.js");
-const { hasModRole } = require("../utils/permissions");
 const db = require("../database");
+const logger = require("../logger");
+const { hasModRole } = require("../utils/permissions");
 const {
   startMatchmakingLoop,
   stopMatchmakingLoop,
@@ -55,36 +56,36 @@ module.exports = {
       if (subcommand === "setinterval") {
         const newInterval = interaction.options.getInteger("milliseconds");
 
-        await new Promise((resolve, reject) => {
-          db.run(
-            `UPDATE settings SET value = ? WHERE key = 'matchmaking_interval'`,
-            [newInterval],
-            (err) => (err ? reject(err) : resolve())
-          );
-        });
+        await db.runAsync(
+          `UPDATE settings SET value = ? WHERE key = 'matchmaking_interval'`,
+          [newInterval]
+        );
 
         const { matchmakingInterval } = await loadMatchmakingSettings();
         restartMatchmakingLoop(interaction.client, db, matchmakingInterval);
 
-        console.info(`✅ Matchmaking interval updated to ${newInterval}ms`);
+        logger.info("⏱️ Matchmaking interval updated", {
+          user: interaction.user.tag,
+          interval: newInterval,
+        });
+
         return interaction.reply({
-          content: `⏳ Matchmaking interval updated to **${
+          content: `⏳ Matchmaking interval updated to **${Math.round(
             newInterval / 1000
-          } seconds**.`,
+          )} seconds**.`,
           flags: 64,
         });
       }
 
       if (subcommand === "pause") {
-        await new Promise((resolve, reject) => {
-          db.run(
-            `UPDATE settings SET value = '1' WHERE key = 'matchmaking_paused'`,
-            [],
-            (err) => (err ? reject(err) : resolve())
-          );
+        await db.runAsync(
+          `UPDATE settings SET value = '1' WHERE key = 'matchmaking_paused'`
+        );
+
+        logger.info("⏸️ Matchmaking paused", {
+          user: interaction.user.tag,
         });
 
-        console.info(`⏸️ Matchmaking paused by ${interaction.user.tag}`);
         return interaction.reply({
           content:
             "⏸️ Matchmaking has been **paused**. Players can still queue, but no matches will be created.",
@@ -93,17 +94,17 @@ module.exports = {
       }
 
       if (subcommand === "resume") {
-        await new Promise((resolve, reject) => {
-          db.run(
-            `UPDATE settings SET value = '0' WHERE key = 'matchmaking_paused'`,
-            [],
-            (err) => (err ? reject(err) : resolve())
-          );
-        });
+        await db.runAsync(
+          `UPDATE settings SET value = '0' WHERE key = 'matchmaking_paused'`
+        );
+
         const { matchmakingInterval } = await loadMatchmakingSettings();
         restartMatchmakingLoop(interaction.client, db, matchmakingInterval);
 
-        console.info(`▶️ Matchmaking resumed by ${interaction.user.tag}`);
+        logger.info("▶️ Matchmaking resumed", {
+          user: interaction.user.tag,
+        });
+
         return interaction.reply({
           content:
             "▶️ Matchmaking has **resumed**. Matches will be created again based on the queue.",
@@ -128,7 +129,10 @@ module.exports = {
         });
       }
     } catch (err) {
-      console.error(`❌ Error in /matchmaking ${subcommand}:`, err);
+      logger.errorWrapper(`❌ Error in /matchmaking ${subcommand}`, err, {
+        user: interaction.user.tag,
+      });
+
       return interaction.reply({
         content:
           "❌ An unexpected error occurred while executing this command.",

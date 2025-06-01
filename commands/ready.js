@@ -1,73 +1,32 @@
-const { SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
+// commands/ready.js
+const { SlashCommandBuilder } = require("discord.js");
 const db = require("../database");
+const logger = require("../logger");
 const { initiateReadyCheck } = require("../utils/readyCheck");
+const { handleReadyConfirmation } = require("../utils/handleReadyConfirmation");
+const {
+  isReadyCheckActive,
+  startReadyCheck,
+} = require("../utils/readyCheckState");
+const { safeSend } = require("../utils/matchmakingUtils/matchUtils");
 
-let activeReadyChecks = new Map();
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("ready")
     .setDescription("Start a ready check or mark yourself as ready"),
 
   async execute(interaction) {
+    const thread = interaction.channel;
+    const userId = interaction.user.id;
+
+    if (!thread?.isThread()) {
+      return interaction.reply({
+        content: "❌ You can only use this command inside a match thread.",
+        flags: 64,
+      });
+    }
+
     try {
-      const thread = interaction.channel;
-      const userId = interaction.user.id;
-      const isAdmin = interaction.member.permissions.has(
-        PermissionFlagsBits.ManageChannels
-      );
-
-      if (!thread?.isThread()) {
-        return interaction.reply({
-          content: "❌ You can only use this command inside a match thread.",
-          flags: 64,
-        });
-      }
-
-      // Ensure global ready check state exists
-      if (!global.activeReadyChecks) global.activeReadyChecks = new Map();
-
-      // Fetch match data
-      const matchData = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT match_id, lastReadyCheck FROM channels WHERE threadId = ?`,
-          [thread.id],
-          (err, row) => (err ? reject(err) : resolve(row))
-        );
-      });
-
-      if (!matchData) {
-        return interaction.reply({
-          content: "❌ This match is not in the database.",
-          flags: 64,
-        });
-      }
-
-      const { match_id, lastReadyCheck } = matchData;
-
-      const activePlayers = await new Promise((resolve, reject) => {
-        db.all(
-          `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
-          [match_id],
-          (err, rows) =>
-            err ? reject(err) : resolve(rows.map((r) => r.playerId))
-        );
-      });
-
-      const players = activePlayers;
-      const now = Date.now();
-      const cooldown = 5 * 60 * 1000; // 5 min
-
-      // If a ready check is already active, just mark the player as ready
-      if (activeReadyChecks.has(thread.id)) {
-        const readyCheck = activeReadyChecks.get(thread.id);
-        readyCheck.readyPlayers.add(userId);
-
-        return interaction.reply({
-          content: "✅ You are marked as ready!",
-          flags: 64,
-        });
-      }
-
       const moderatorRoleIds = [
         process.env.TICKET_HANDLER_ROLE,
         process.env.ELDEN_MODERATOR_ROLE,
@@ -81,7 +40,31 @@ module.exports = {
           interaction.member.roles.cache.has(roleId)
         );
 
-      // If cooldown is active and not bypassed by a moderator
+      const matchData = await db.getAsync(
+        `SELECT match_id, lastReadyCheck FROM channels WHERE threadId = ?`,
+        [thread.id]
+      );
+
+      if (!matchData) {
+        return interaction.reply({
+          content: "❌ This match is not in the database.",
+          flags: 64,
+        });
+      }
+
+      const { match_id, lastReadyCheck } = matchData;
+      const now = Date.now();
+      const cooldown = 5 * 60 * 1000;
+
+      if (isReadyCheckActive(thread.id)) {
+        return await handleReadyConfirmation(
+          thread,
+          userId,
+          "slash",
+          interaction
+        );
+      }
+
       if (!isMod && now - lastReadyCheck < cooldown) {
         return interaction.reply({
           content:
@@ -90,28 +73,57 @@ module.exports = {
         });
       }
 
-      // Update DB with new ready check timestamp
-      db.run(`UPDATE channels SET lastReadyCheck = ? WHERE threadId = ?`, [
-        now,
-        thread.id,
-      ]);
+      const players = await db
+        .allAsync(
+          `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
+          [match_id]
+        )
+        .then((rows) => rows.map((r) => r.playerId));
 
-      // Start a new ready check
-      activeReadyChecks.set(thread.id, {
-        readyPlayers: new Set([userId]),
-      });
+      if (!players.includes(userId)) {
+        return interaction.reply({
+          content: "❌ You are not an active player in this match.",
+          flags: 64,
+        });
+      }
+      if (players.length <= 1) {
+        return interaction.reply({
+          content:
+            "❌ You need at least 2 active players to initiate a ready check.",
+          flags: 64,
+        });
+      }
 
-      await interaction.reply(
-        "📣 Ready check initiated! Type `/ready` to mark yourself ready."
+      await db.runAsync(
+        `UPDATE channels SET lastReadyCheck = ? WHERE threadId = ?`,
+        [now, thread.id]
       );
 
+      startReadyCheck(thread.id, userId);
+
+      await interaction.reply({
+        content:
+          "📣 Ready check initiated! Type `/ready` again or press the button to confirm.",
+      });
+
+      await safeSend(thread, "⏳ Ready check is now active.");
       await initiateReadyCheck(thread, players);
-    } catch (error) {
-      console.error(`Error executing /ready command: ${error.message}`);
-      return interaction.reply({
+    } catch (err) {
+      logger.errorWrapper("❌ Error executing /ready command", err, {
+        userId,
+        threadId: thread?.id,
+      });
+
+      const errorMsg = {
         content: "❌ An error occurred while starting the ready check.",
         flags: 64,
-      });
+      };
+
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp(errorMsg).catch(() => {});
+      } else {
+        await interaction.reply(errorMsg).catch(() => {});
+      }
     }
   },
 };

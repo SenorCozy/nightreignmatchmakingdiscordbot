@@ -1,0 +1,211 @@
+/* === Night Reign Dashboard CSS (Refined & Avatar/Text Centered) === */
+
+body {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(to bottom, #100c1d, #1d1333);
+  color: #f0f0f5;
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+.navbar {
+  width: 100%;
+  background: #1a132a;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+  padding: 12px 0;
+  position: fixed;
+  top: 0;
+  z-index: 1000;
+  display: flex;
+  justify-content: center;
+}
+
+.navbar ul {
+  list-style: none;
+  display: flex;
+  gap: 25px;
+  padding: 0;
+  margin: 0;
+  flex-wrap: wrap;
+}
+
+.navbar ul li a {
+  color: #ddd6f3;
+  font-weight: bold;
+  text-decoration: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+.navbar ul li a:hover,
+.navbar ul li a.active {
+  background: #372b64;
+  color: #ffd166;
+  box-shadow: 0 0 12px rgba(255, 209, 102, 0.6);
+}
+
+.container {
+  width: 90%;
+  max-width: 1000px;
+  margin-top: 80px;
+  padding: 20px;
+  background: #211b36;
+  border-radius: 12px;
+  box-shadow: 0 4px 25px rgba(0, 0, 0, 0.4);
+}
+
+h1,
+h2 {
+  text-align: center;
+  color: #ffd166;
+  margin-bottom: 10px;
+}
+
+.status-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 20px;
+  border-radius: 12px;
+  background-color: rgba(255, 255, 255, 0.05);
+  text-align: center;
+}
+
+.bot-avatar {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid #ffd166;
+  background: #0e0e1a;
+}
+
+.welcome-msg {
+  font-weight: bold;
+  font-size: 1rem;
+  color: #f0f0f5;
+  text-align: center;
+  margin-bottom: 10px;
+}
+
+.status-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+
+.status-text h2 {
+  margin: 0;
+  font-size: 1.4rem;
+  color: #ffd166;
+}
+
+.status-indicator {
+  color: #4caf50;
+  font-weight: bold;
+  margin: 0;
+}
+
+.status-grid {
+  display: flex;
+  gap: 24px;
+  font-size: 0.95rem;
+  margin-top: 4px;
+  justify-content: center;
+}
+
+.controls {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin-bottom: 25px;
+}
+
+.control-btn {
+  background: linear-gradient(135deg, #7b2cbf, #5a189a);
+  color: white;
+  border: none;
+  padding: 12px 20px;
+  font-size: 1rem;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  font-weight: bold;
+  box-shadow: 0 0 8px rgba(91, 24, 154, 0.4);
+}
+
+.control-btn:hover {
+  transform: scale(1.05);
+  background: linear-gradient(135deg, #9d4edd, #7b2cbf);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #2e2551;
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+th,
+td {
+  padding: 10px;
+  text-align: left;
+  border-bottom: 1px solid #443a66;
+}
+
+th {
+  background-color: #372b64;
+  color: #ffd166;
+}
+
+tr:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.transcript-view {
+  color: #80ed99;
+  font-weight: bold;
+  text-decoration: none;
+  transition: color 0.3s;
+}
+
+.transcript-view:hover {
+  color: #baffc9;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .status-grid {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .controls {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .container {
+    width: 95%;
+    padding: 15px;
+  }
+
+  th,
+  td {
+    font-size: 14px;
+  }
+}

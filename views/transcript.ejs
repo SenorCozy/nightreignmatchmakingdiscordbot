@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>Transcript - <%= transcript.id %></title>
+    <link rel="stylesheet" href="/transcript.css" />
+  </head>
+  <body>
+    <nav class="navbar">
+      <ul>
+        <li><a href="/dashboard">🏠 Dashboard</a></li>
+        <li><a href="/transcripts" class="active">📜 Transcripts</a></li>
+      </ul>
+    </nav>
+
+    <div class="container">
+      <h1>📜 Match Transcript</h1>
+      <div class="transcript-meta">
+        <p><strong>Match ID:</strong> <%= transcript.match_id %></p>
+        <p>
+          <strong>Platform:</strong> <%= transcript.platform || 'Unknown' %>
+        </p>
+        <p>
+          <strong>Reason:</strong> <%= transcript.closure_reason || 'N/A' %>
+        </p>
+        <p>
+          <strong>Opened By:</strong> <%= transcript.username || 'Unknown' %>
+        </p>
+        <p>
+          <strong>Closed By:</strong> <%= transcript.closed_by_username ||
+          'Unknown' %>
+        </p>
+        <p>
+          <strong>Created:</strong> <%= new
+          Date(transcript.created_at).toLocaleString() %>
+        </p>
+        <p>
+          <strong>Closed:</strong> <%= new
+          Date(transcript.closed_at).toLocaleString() %>
+        </p>
+        <p>
+          <strong>Initial Players:</strong> <%= transcript.initial_player_ids ||
+          'N/A' %>
+        </p>
+        <p>
+          <strong>Interim Players:</strong> <%= transcript.interim_player_ids ||
+          'N/A' %>
+        </p>
+        <p>
+          <strong>Final Players:</strong> <%= transcript.final_player_ids ||
+          'N/A' %>
+        </p>
+      </div>
+
+      <div class="messages">
+        <% messages.forEach(msg => { %>
+        <div
+          class="message <%= msg.user_id === 'system' ? 'system-message' : '' %>"
+        >
+          <% if (msg.user_id !== 'system' || msg.avatar_url) { %>
+          <img class="avatar" src="<%= msg.avatar_url %>" alt="avatar" />
+          <% } %>
+
+          <div class="message-content">
+            <div class="header">
+              <span class="username"><%= msg.username %></span>
+              <span class="timestamp"
+                ><%= new Date(msg.timestamp).toLocaleString() %></span
+              >
+            </div>
+
+            <% if (msg.message && msg.message.trim()) { %>
+            <p class="text <%= msg.user_id === 'system' ? 'italic' : '' %>">
+              <%= msg.message %>
+            </p>
+            <% } %> <% if (msg.attachment_url) { %>
+            <div class="attachment">
+              <img src="<%= msg.attachment_url %>" alt="attachment" />
+              <p class="text text-muted"><%= msg.attachment_url %></p>
+            </div>
+            <% } %> <% if (msg.embed_data) { let embeds =
+            JSON.parse(msg.embed_data); %>
+            <div class="embed">
+              <% embeds.forEach(embed => { %>
+              <div class="embed-box">
+                <% if (embed.title) { %>
+                <div class="embed-title"><%= embed.title %></div>
+                <% } %> <% if (embed.description) { %>
+                <div class="embed-description"><%= embed.description %></div>
+                <% } %> <% if (embed.fields && embed.fields.length) { %>
+                <div class="embed-fields">
+                  <% embed.fields.forEach(field => { %>
+                  <div class="embed-field">
+                    <strong><%= field.name %></strong><br />
+                    <%= field.value %>
+                  </div>
+                  <% }) %>
+                </div>
+                <% } %>
+              </div>
+              <% }) %>
+            </div>
+            <% } %> <% if (!msg.message && !msg.attachment_url &&
+            !msg.embed_data) { %>
+            <p class="text text-muted">(No content)</p>
+            <% } %> <% if (msg.reactions) { let reactions =
+            JSON.parse(msg.reactions); %>
+            <div class="reactions">
+              <% reactions.forEach(r => { %>
+              <span class="reaction"><%= r.emoji %> <%= r.count %></span>
+              <% }) %>
+            </div>
+            <% } %>
+          </div>
+        </div>
+        <% }) %>
+      </div>
+    </div>
+  </body>
+</html>

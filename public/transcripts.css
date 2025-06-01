@@ -1,0 +1,157 @@
+/* === Night Reign Transcripts Page Styling === */
+
+body {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(to bottom, #100c1d, #1d1333);
+  color: #f0f0f5;
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+.navbar {
+  width: 100%;
+  background: #1a132a;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+  padding: 12px 0;
+  position: fixed;
+  top: 0;
+  z-index: 1000;
+  display: flex;
+  justify-content: center;
+}
+
+.navbar ul {
+  list-style: none;
+  display: flex;
+  gap: 25px;
+  padding: 0;
+  margin: 0;
+  flex-wrap: wrap;
+}
+
+.navbar ul li a {
+  color: #ddd6f3;
+  font-weight: bold;
+  text-decoration: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+.navbar ul li a:hover,
+.navbar ul li a.active {
+  background: #372b64;
+  color: #ffd166;
+  box-shadow: 0 0 12px rgba(255, 209, 102, 0.6);
+}
+
+.container {
+  width: 90%;
+  max-width: 1000px;
+  margin-top: 100px;
+  padding: 20px;
+  background: #211b36;
+  border-radius: 12px;
+  box-shadow: 0 4px 25px rgba(0, 0, 0, 0.4);
+}
+
+h1 {
+  text-align: center;
+  color: #ffd166;
+  margin-bottom: 20px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #2e2551;
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+
+th,
+td {
+  padding: 12px;
+  text-align: left;
+  border-bottom: 1px solid #443a66;
+}
+
+th {
+  background-color: #372b64;
+  color: #ffd166;
+  font-weight: bold;
+  font-size: 0.95rem;
+}
+
+td {
+  font-size: 0.9rem;
+  word-break: break-word;
+}
+
+tr:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.transcript-view {
+  color: #80ed99;
+  font-weight: bold;
+  text-decoration: none;
+  transition: color 0.3s;
+}
+
+.transcript-view:hover {
+  color: #baffc9;
+}
+
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 20px;
+  margin-top: 20px;
+  font-size: 1rem;
+}
+
+.page-btn {
+  background: #5a189a;
+  color: white;
+  padding: 8px 14px;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: bold;
+  transition: background 0.3s;
+}
+
+.page-btn:hover {
+  background: #7b2cbf;
+}
+
+@media (max-width: 768px) {
+  .container {
+    width: 95%;
+    padding: 15px;
+  }
+
+  table {
+    font-size: 0.85rem;
+  }
+
+  th,
+  td {
+    padding: 10px;
+  }
+
+  .pagination {
+    flex-direction: column;
+    gap: 10px;
+  }
+}

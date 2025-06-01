@@ -1,6 +1,7 @@
 const { SlashCommandBuilder } = require("discord.js");
-const { hasModRole } = require("../utils/permissions");
 const db = require("../database");
+const logger = require("../logger");
+const { hasModRole } = require("../utils/permissions");
 const {
   incrementMatchesPlayed,
   trackQueueLeaveTimestamp,
@@ -36,7 +37,6 @@ module.exports = {
     try {
       const now = Date.now();
 
-      // ✅ Check if blacklisted
       const isBlacklisted = await new Promise((resolve, reject) => {
         db.get(
           `SELECT id FROM blacklist WHERE id = ?`,
@@ -52,7 +52,6 @@ module.exports = {
         });
       }
 
-      // ✅ Fetch match info
       const match = await new Promise((resolve, reject) => {
         db.get(
           `SELECT match_id, voiceChannelId FROM channels WHERE threadId = ?`,
@@ -70,7 +69,6 @@ module.exports = {
 
       const { match_id, voiceChannelId } = match;
 
-      // ✅ Check if already in match as active
       const existing = await new Promise((resolve, reject) => {
         db.get(
           `SELECT status FROM match_players WHERE match_id = ? AND playerId = ?`,
@@ -86,7 +84,6 @@ module.exports = {
         });
       }
 
-      // ✅ Upsert into match_players
       await db.run(
         `INSERT INTO match_players (match_id, threadId, playerId, status, joined_at)
          VALUES (?, ?, ?, 'active', ?)
@@ -94,53 +91,57 @@ module.exports = {
         [match_id, thread.id, playerId, now]
       );
 
-      // ✅ Insert match_event for auditing
       await db.run(
         `INSERT INTO match_events (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
          VALUES (?, ?, ?, 'join', ?, ?, 'active')`,
         [match_id, thread.id, playerId, now, "manually added by mod"]
       );
 
-      // ✅ Update statistics
       await db.run(`INSERT OR IGNORE INTO player_statistics (id) VALUES (?)`, [
         playerId,
       ]);
       await incrementMatchesPlayed(playerId);
       await trackQueueLeaveTimestamp(playerId);
 
-      // ✅ Add to thread and permissions
       try {
         await thread.members.add(playerId);
       } catch (err) {
-        console.warn(`⚠️ Could not update thread perms:`, err.message);
+        logger.warn("⚠️ Could not update thread permissions", {
+          playerId,
+          error: err.message,
+        });
       }
 
-      // ✅ Voice channel perms
       if (voiceChannelId) {
         const vc = thread.guild.channels.cache.get(voiceChannelId);
         if (vc) {
           try {
-            await vc.permissionOverwrites
-              .edit(playerId, {
-                ViewChannel: true,
-                Connect: true,
-                Speak: true,
-              })
-              .catch(() => {});
+            await vc.permissionOverwrites.edit(playerId, {
+              ViewChannel: true,
+              Connect: true,
+              Speak: true,
+            });
           } catch (err) {
-            console.warn(`⚠️ Could not update VC perms:`, err.message);
+            logger.warn("⚠️ Could not update voice channel permissions", {
+              playerId,
+              voiceChannelId,
+              error: err.message,
+            });
           }
         } else {
-          console.warn(`⚠️ VC not found for ID: ${voiceChannelId}`);
+          logger.warn("⚠️ Voice channel not found", { voiceChannelId });
         }
       }
 
+      logger.info(`✅ Added user ${playerId} to match ${match_id}`);
       return interaction.reply({
         content: `✅ <@${playerId}> has been added to the match.`,
-        flags: 64,
       });
     } catch (error) {
-      console.error("❌ Error in /add command:", error);
+      logger.errorWrapper("❌ Error in /add command", error, {
+        threadId: thread.id,
+        playerId,
+      });
       return interaction.reply({
         content: "❌ An error occurred while adding the user.",
         flags: 64,

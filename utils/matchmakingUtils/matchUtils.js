@@ -2,19 +2,43 @@ const db = require("../../database");
 const {
   addToTotalMatchTime,
   trackLongestMatchTime,
-  incrementMatchesPlayed,
+  incrementMatchesCompleted,
+  ensurePlayerStatRow,
   addToPlayerMatchTime,
-  trackQueueLeaveTimestamp,
 } = require("../playerstatshelper");
 
+const {
+  updateGlobalLongestMatch,
+  addToPlatformMatchTime,
+  updatePlatformLongestMatchTime,
+  incrementPlatformMatchCount,
+} = require("../botstatshelper");
+
+const { awardMatchCompletionPoints } = require("../rewardUtils");
+const {
+  unlockAchievementIfNotEarned,
+  awardHighTurnoverAchievements,
+  check24hMatchCompletionStreak,
+  checkDailyMatchStreakAchievements,
+} = require("../../utils/achievementHelpers");
+const { evaluateEventProgress } = require("../../utils/eventUtils");
+const {
+  activeKickVotes,
+  matchEndCollectors,
+  activeMatchEndVotes,
+  kickCollectors,
+} = require("../matchVoteState");
+const { getReadyCheck, endReadyCheck } = require("../readyCheckState");
 const {
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
 } = require("discord.js");
+const logger = require("../../logger");
 
-const { updateGlobalLongestMatch } = require("../botstatshelper");
+const cleanupInProgress = new Set();
+const transcriptInProgress = new Set();
 
 async function isPlayerInActiveMatch(playerId) {
   try {
@@ -27,7 +51,7 @@ async function isPlayerInActiveMatch(playerId) {
     });
     return !!result;
   } catch (error) {
-    console.error("Error checking if player is in an active match:", error);
+    logger.errorWrapper("isPlayerInActiveMatch", error, { playerId });
     return false;
   }
 }
@@ -38,124 +62,228 @@ async function cleanupMatch({
   closedByUserOrBot = { id: "system", username: "Auto Cleanup" },
   closureReason = "Inactivity",
 }) {
+  if (!thread?.id || !thread.guild) {
+    logger.warn("cleanupMatch called with invalid or missing thread", {
+      thread,
+    });
+    return;
+  }
+
+  if (cleanupInProgress.has(thread.id)) {
+    logger.warn("⚠️ Duplicate cleanupMatch prevented for thread", {
+      threadId: thread.id,
+    });
+    return;
+  }
+
+  cleanupInProgress.add(thread.id);
+
   try {
-    if (!thread?.id || !thread.guild) {
-      console.warn("cleanupMatch called with invalid or missing thread.");
-      return;
+    const wasAutoClosed = closureReason.toLowerCase().includes("inactivity");
+
+    // Cancel collectors
+    endReadyCheck(thread.id);
+    matchEndCollectors.get(thread.id)?.stop("cleanup");
+    matchEndCollectors.delete(thread.id);
+    activeMatchEndVotes.delete(thread.id);
+
+    for (const key of [...kickCollectors.keys()]) {
+      if (key.startsWith(`${thread.id}:`)) {
+        kickCollectors.get(key)?.stop("cleanup");
+        kickCollectors.delete(key);
+        activeKickVotes.delete(key);
+      }
     }
 
-    const matchInfo = await new Promise((resolve, reject) => {
-      db.get(
-        `SELECT match_id, created_at FROM matches WHERE thread_id = ?`,
-        [thread.id],
-        (err, row) => (err ? reject(err) : resolve(row))
-      );
-    });
-
+    const matchInfo = await db.getAsync(
+      `SELECT match_id, created_at, platform FROM matches WHERE thread_id = ?`,
+      [thread.id]
+    );
     const match_id = matchInfo?.match_id;
     const createdAt = matchInfo?.created_at;
+    const platform = matchInfo?.platform || "unknown";
+
     if (!match_id || !createdAt) {
-      console.warn(
-        `⚠️ Missing match_id or created_at for thread: ${thread.name}`
-      );
+      logger.warn("Missing match_id or created_at for thread", {
+        threadName: thread.name,
+      });
       return;
     }
 
     const now = Date.now();
-    const matchDuration = now - createdAt;
+    const matchDuration = now - new Date(createdAt).getTime();
+    await awardMatchCompletionPoints(
+      match_id,
+      new Date(createdAt).getTime(),
+      true,
+      null,
+      thread.guild ?? thread.client.guilds.cache.first()
+    );
 
-    const playerStatuses = await new Promise((resolve, reject) => {
-      db.all(
-        `SELECT playerId, status FROM match_players WHERE match_id = ?`,
-        [match_id],
-        (err, rows) => (err ? reject(err) : resolve(rows))
+    let initialPlayers = global.initialPlayersByMatch?.[thread.id] || [];
+
+    if (!initialPlayers.length) {
+      const row = await db.getAsync(
+        `SELECT initial_player_ids FROM matches WHERE match_id = ?`,
+        [match_id]
       );
-    });
+      initialPlayers = row?.initial_player_ids?.split(",") || [];
+    }
 
-    const activePlayers = playerStatuses
+    const playerStatuses = await db.allAsync(
+      `SELECT playerId, status FROM match_players WHERE match_id = ?`,
+      [match_id]
+    );
+
+    const finalPlayers = playerStatuses
       .filter((p) => p.status === "active")
       .map((p) => p.playerId);
 
-    // Set leave_in_progress = 1 for all players
-    await new Promise((res, rej) =>
-      db.run(
-        `UPDATE match_players SET leave_in_progress = 1 WHERE match_id = ?`,
-        [match_id],
-        (err) => (err ? rej(err) : res())
-      )
+    await db.runAsync(
+      `UPDATE match_players SET leave_in_progress = 1 WHERE match_id = ?`,
+      [match_id]
     );
-
-    console.info(`📝 Generating transcript for match ${match_id}...`);
-    await generateMatchTranscript(thread, closedByUserOrBot, closureReason);
 
     for (const { playerId, status } of playerStatuses) {
       let finalStatus = status;
 
       if (status === "active") {
-        finalStatus = closureReason.toLowerCase().includes("inactivity")
-          ? "inactivematchended"
-          : "matchended";
-
-        // Update match_players with final status
-        await new Promise((res, rej) =>
-          db.run(
-            `UPDATE match_players SET status = ? WHERE match_id = ? AND playerId = ?`,
-            [finalStatus, match_id, playerId],
-            (err) => (err ? rej(err) : res())
-          )
+        finalStatus = wasAutoClosed ? "inactivematchended" : "matchended";
+        await db.runAsync(
+          `UPDATE match_players SET status = ? WHERE match_id = ? AND playerId = ?`,
+          [finalStatus, match_id, playerId]
         );
       }
 
-      // Insert into match_events
-      await new Promise((res, rej) =>
-        db.run(
-          `INSERT INTO match_events (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
-           VALUES (?, ?, ?, 'match_cleanup', ?, ?, ?)`,
-          [match_id, thread.id, playerId, now, closureReason, finalStatus],
-          (err) => (err ? rej(err) : res())
-        )
+      await db.runAsync(
+        `INSERT INTO match_events (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
+         VALUES (?, ?, ?, 'match_cleanup', ?, ?, ?)`,
+        [match_id, thread.id, playerId, now, closureReason, finalStatus]
       );
 
-      // Remove from match_players
-      await new Promise((res, rej) =>
-        db.run(
-          `DELETE FROM match_players WHERE match_id = ? AND playerId = ?`,
-          [match_id, playerId],
-          (err) => (err ? rej(err) : res())
-        )
-      );
+      await ensurePlayerStatRow(playerId);
 
-      // Remove from players table
-      await new Promise((res, rej) =>
-        db.run(`DELETE FROM players WHERE id = ?`, [playerId], (err) =>
-          err ? rej(err) : res()
-        )
-      );
-
-      // Update statistics
       try {
-        await incrementMatchesPlayed(playerId);
         await trackLongestMatchTime(playerId, matchDuration);
         await addToPlayerMatchTime(playerId, matchDuration);
-        await trackQueueLeaveTimestamp(playerId);
-      } catch (err) {
-        console.warn(
-          `⚠️ Failed to update stats for ${playerId}: ${err.message}`
+        await incrementMatchesCompleted(
+          playerId,
+          wasAutoClosed ? 0 : matchDuration,
+          match_id,
+          wasAutoClosed ? 1 : null
         );
+      } catch (err) {
+        logger.warn("📉 Stat update failed", {
+          playerId,
+          matchDuration,
+          error: err.stack || err.message,
+        });
       }
     }
-    console.info(`📝 Generating transcript for match ${match_id}...`);
 
-    await addToTotalMatchTime(matchDuration);
-    await updateGlobalLongestMatch(matchDuration);
+    logger.info(`📝 Generating transcript for match ${match_id}...`);
+
+    await generateMatchTranscript(
+      thread,
+      closedByUserOrBot,
+      closureReason,
+      initialPlayers,
+      finalPlayers
+    );
+
+    await awardHighTurnoverAchievements(match_id);
+
+    // 🎯 Evaluate event progress for completion-based goals
+    for (const playerId of finalPlayers) {
+      const metadata = {
+        matchId: match_id,
+        matchDuration,
+        platform,
+        initialPlayerIds: initialPlayers,
+        finalPlayerIds: finalPlayers,
+      };
+
+      await Promise.all([
+        evaluateEventProgress(playerId, "complete_match", 1, metadata),
+        evaluateEventProgress(playerId, "matches_completed", 1, metadata),
+        evaluateEventProgress(playerId, "complete_with_user", 1, metadata),
+        evaluateEventProgress(
+          playerId,
+          "complete_long_match",
+          matchDuration,
+          metadata
+        ),
+        evaluateEventProgress(
+          playerId,
+          "complete_1_hour_match",
+          matchDuration,
+          metadata
+        ),
+      ]);
+
+      if (matchInfo?.formation_type === "duo") {
+        await evaluateEventProgress(
+          playerId,
+          "matches_completed_duo",
+          1,
+          metadata
+        );
+      }
+
+      if (matchInfo?.formation_type === "trio") {
+        await evaluateEventProgress(
+          playerId,
+          "matches_completed_trio",
+          1,
+          metadata
+        );
+      }
+      await check24hMatchCompletionStreak(playerId);
+      await checkDailyMatchStreakAchievements(playerId);
+    }
+
+    delete global.initialPlayersByMatch?.[thread.id];
+
+    await db.runAsync(`DELETE FROM match_players WHERE match_id = ?`, [
+      match_id,
+    ]);
+
+    await db.runAsync(
+      `DELETE FROM players WHERE id IN (${playerStatuses
+        .map(() => "?")
+        .join(",")})`,
+      playerStatuses.map((p) => p.playerId)
+    );
+
+    await db.runAsync(
+      `UPDATE matches SET closed_at = ?, closed_by = ?, closure_reason = ? WHERE match_id = ?`,
+      [now, closedByUserOrBot.id || "system", closureReason, match_id]
+    );
+
+    await db.runAsync(`DELETE FROM channels WHERE threadId = ?`, [thread.id]);
+
+    try {
+      await Promise.all([
+        addToTotalMatchTime(matchDuration),
+        updateGlobalLongestMatch(matchDuration),
+        addToPlatformMatchTime(platform, matchDuration),
+        updatePlatformLongestMatchTime(platform, matchDuration),
+        incrementPlatformMatchCount(platform),
+      ]);
+    } catch (err) {
+      logger.warn("⚠️ Bot/platform stat update failed in cleanupMatch", {
+        error: err.message,
+      });
+    }
 
     try {
       await thread.delete("Cleaning up match");
-      console.info(`🧹 Successfully deleted thread: ${thread.name}`);
+      logger.info(`🧹 Successfully deleted thread: ${thread.name}`);
     } catch (err) {
-      console.error(
-        `❌ Could not delete thread ${thread.id} (${thread.name}): ${err.message}`
-      );
+      logger.errorWrapper("Thread deletion failed", err, {
+        threadId: thread.id,
+        threadName: thread.name,
+      });
     }
 
     const vc = thread.guild.channels.cache.get(voiceChannelId);
@@ -169,42 +297,33 @@ async function cleanupMatch({
         for (const member of vc.members.values()) {
           try {
             await member.voice.disconnect();
-            console.info(`🔌 Disconnected ${member.user.tag}`);
+            logger.info(`🔌 Disconnected ${member.user.tag}`);
           } catch (err) {
-            console.warn(
-              `⚠️ Could not disconnect ${member.user.tag}: ${err.message}`
-            );
+            logger.warn("Failed to disconnect VC member", {
+              member: member.user.tag,
+              error: err.message,
+            });
           }
         }
 
         await new Promise((r) => setTimeout(r, 2000));
         await vc.delete("Cleaning up inactive match");
-        console.info(`✅ Deleted voice channel: ${vc.name}`);
+        logger.info(`✅ Deleted voice channel: ${vc.name}`);
       } catch (err) {
-        console.error(`❌ VC cleanup failed: ${err.message}`);
+        logger.errorWrapper("VC cleanup failed", err);
       }
     }
 
-    await new Promise((res, rej) =>
-      db.run(`DELETE FROM channels WHERE threadId = ?`, [thread.id], (err) =>
-        err ? rej(err) : res()
-      )
-    );
-
-    await new Promise((res, rej) =>
-      db.run(`DELETE FROM matches WHERE match_id = ?`, [match_id], (err) =>
-        err ? rej(err) : res()
-      )
-    );
-
-    console.info(`✅ Match cleanup complete for thread: ${thread.name}`);
+    logger.info(`✅ Match cleanup complete for thread: ${thread.name}`);
   } catch (error) {
-    console.error("❌ Unhandled error in cleanupMatch:", error);
+    logger.errorWrapper("Unhandled error in cleanupMatch", error);
+  } finally {
+    cleanupInProgress.delete(thread.id);
   }
 }
 
 async function cleanupMatches(client) {
-  console.info("🧹 Running periodic cleanup...");
+  logger.info("🧹 Running periodic cleanup...");
 
   client.guilds.cache.forEach(async (guild) => {
     const allThreads = guild.channels.cache.filter((channel) =>
@@ -222,7 +341,7 @@ async function cleanupMatches(client) {
         });
 
         if (!dbResult) {
-          console.warn(`⚠️ No DB entry for thread: ${thread.name}`);
+          logger.warn("⚠️ No DB entry for thread", { threadName: thread.name });
           continue;
         }
 
@@ -241,134 +360,242 @@ async function cleanupMatches(client) {
         if (voiceChannelId) {
           const vc = guild.channels.cache.get(voiceChannelId);
           if (vc && vc.members.size > 0) {
-            console.info(
-              `🎤 Skipping: ${vc.name} has ${vc.members.size} users`
-            );
+            logger.info("🎤 Skipping voice channel with active users", {
+              threadName: thread.name,
+              vcName: vc.name,
+              memberCount: vc.members.size,
+            });
             continue;
           }
         }
 
-        if (minutesInactive > 5) {
-          console.info(
-            `🕒 Cleaning up thread ${
-              thread.name
-            } (inactive ${minutesInactive.toFixed(2)} min)`
-          );
+        if (minutesInactive > 65) {
+          logger.info("🕒 Thread inactive — initiating cleanup", {
+            threadName: thread.name,
+            minutesInactive: minutesInactive.toFixed(2),
+          });
+
           await cleanupMatch({ thread, voiceChannelId });
         } else {
-          console.info(
-            `⌛ Skipping: ${
-              thread.name
-            } is only inactive ${minutesInactive.toFixed(2)} min`
-          );
+          logger.info("⌛ Thread still active — skipping", {
+            threadName: thread.name,
+            minutesInactive: minutesInactive.toFixed(2),
+          });
         }
       } catch (err) {
-        console.error(`❌ Cleanup failed for thread ${thread.name}:`, err);
+        logger.errorWrapper("❌ Cleanup failed for thread", err, {
+          threadName: thread.name,
+        });
       }
     }
   });
 }
 
+function formatMentions(msg) {
+  const mentions = msg.mentions?.users;
+
+  if (mentions?.size > 0) {
+    return Array.from(mentions.values())
+      .map((u) => `<@${u.id}> (${u.username})`)
+      .join(", ");
+  }
+
+  // fallback: regex match all mention IDs
+  const fallbackMatches = msg.content?.match(/<@!?\d+>/g);
+  return fallbackMatches?.join(", ") || "someone";
+}
+
+function getSystemMessageDescription(msg) {
+  const authorName = msg.author?.username || "A user";
+  const mentionedUsers = formatMentions(msg);
+
+  switch (msg.type) {
+    case 1:
+      return `➕ ${authorName} added ${mentionedUsers} to a group.`;
+    case 2:
+      return `➖ ${authorName} removed ${mentionedUsers} from the thread.`;
+    case 3:
+      return `✏️ Channel name changed to: ${msg.content}`;
+    case 4:
+      return "🖼️ Channel icon updated.";
+    case 5:
+      return "📌 A message was pinned.";
+    case 6:
+      return `🎉 ${authorName} joined the server.`;
+    case 12:
+      return `🧵 ${authorName} created a thread.`;
+    case 18:
+      return `➕ ${authorName} added ${mentionedUsers} to the thread.`;
+    case 19:
+      return `➖ ${authorName} removed ${mentionedUsers} from the thread.`;
+    case 20:
+      return `✅ ${authorName} joined the thread.`;
+    case 21:
+      return `🚪 ${authorName} left the thread.`;
+    default:
+      logger.debug("Unknown system message", {
+        type: msg.type,
+        author: authorName,
+        content: msg.content,
+      });
+      return `ℹ️ Unknown system event (type ${msg.type})`;
+  }
+}
+
 async function generateMatchTranscript(
   thread,
   closedBy,
-  closureReason = "Unknown"
+  closureReason = "Unknown",
+  initialPlayers = [],
+  finalPlayers = []
 ) {
+  if (!thread?.id || !thread.guild) {
+    logger.warn("generateMatchTranscript called with invalid thread", {
+      thread,
+    });
+    return;
+  }
+
+  if (transcriptInProgress.has(thread.id)) {
+    logger.warn("⚠️ Duplicate transcript generation prevented", {
+      threadId: thread.id,
+    });
+    return;
+  }
+
+  transcriptInProgress.add(thread.id);
+
   try {
+    const freshThread = await thread.client.channels
+      .fetch(thread.id)
+      .catch(() => null);
+    if (!freshThread || freshThread.deleted || freshThread.archived) {
+      logger.warn(
+        "🛑 Aborting transcript generation — thread no longer exists",
+        {
+          threadId: thread.id,
+        }
+      );
+      return;
+    }
+
     const createdAt = thread.createdTimestamp;
     const closedAt = Date.now();
+    const durationMs = closedAt - createdAt;
 
-    const match_id = await new Promise((resolve, reject) => {
-      db.get(
-        `SELECT match_id FROM matches WHERE thread_id = ?`,
-        [thread.id],
-        (err, row) => (err ? reject(err) : resolve(row?.match_id))
-      );
-    });
+    const matchInfo = await db.getAsync(
+      `SELECT match_id, platform, formation_type, initial_player_ids FROM matches WHERE thread_id = ?`,
+      [thread.id]
+    );
 
-    // Final active players
-    const activePlayers = await new Promise((resolve, reject) => {
-      db.all(
-        `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
-        [match_id],
-        (err, rows) =>
-          err ? reject(err) : resolve(rows.map((r) => `<@${r.playerId}>`))
-      );
-    });
+    const match_id = matchInfo?.match_id;
+    let platform = matchInfo?.platform || "Unknown";
+    const formationType = matchInfo?.formation_type || "Unknown";
 
-    // Deprecated players with final_status and reason
-    const deprecatedPlayers = await new Promise((resolve, reject) => {
-      db.all(
-        `SELECT playerId, final_status, reason 
-     FROM match_events 
-     WHERE match_id = ? 
-       AND eventType IN ('leave', 'kick', 'readycheck_fail')
-     GROUP BY playerId`,
-        [match_id],
-        (err, rows) =>
-          err
-            ? reject(err)
-            : resolve(
-                rows.map(
-                  (r) =>
-                    `<@${r.playerId}> (${r.final_status || "unknown"}${
-                      r.reason ? `: ${r.reason}` : ""
-                    })`
-                )
-              )
-      );
-    });
+    if (!match_id) {
+      logger.warn("❌ Missing match_id for thread", {
+        threadName: thread.name,
+      });
+      return;
+    }
 
-    const voiceChannelId = await new Promise((resolve, reject) => {
-      db.get(
-        `SELECT voiceChannelId FROM channels WHERE match_id = ?`,
-        [match_id],
-        (err, row) => (err ? reject(err) : resolve(row?.voiceChannelId || null))
-      );
-    });
+    // Format platform name
+    const platformMap = {
+      pc: "PC (Steam)",
+      xbox: "XBOX",
+      playstation: "Playstation",
+    };
+    platform = platformMap[platform.toLowerCase()] || platform;
 
-    const matchCount = await new Promise((resolve, reject) => {
-      db.get(`SELECT COUNT(*) AS count FROM matches`, [], (err, row) =>
-        err ? reject(err) : resolve(row.count)
-      );
-    });
+    if (!initialPlayers.length && matchInfo.initial_player_ids) {
+      initialPlayers = matchInfo.initial_player_ids.split(",");
+    }
+
+    const allPlayers = await db.allAsync(
+      `SELECT playerId, status FROM match_players WHERE match_id = ?`,
+      [match_id]
+    );
+
+    const interimPlayers = allPlayers
+      .filter(
+        (p) =>
+          !initialPlayers.includes(p.playerId) &&
+          !finalPlayers.includes(p.playerId)
+      )
+      .map((p) => p.playerId);
+
+    const voiceChannelId = await db
+      .getAsync(`SELECT voiceChannelId FROM channels WHERE match_id = ?`, [
+        match_id,
+      ])
+      .then((row) => row?.voiceChannelId || null);
+
+    const matchCount = await db
+      .getAsync(`SELECT COUNT(*) AS count FROM matches`)
+      .then((row) => row.count);
 
     const messages = await fetchAllMessages(thread);
-    const formatted = messages.map((msg) => ({
-      user_id: msg.author.id,
-      username: msg.author.username,
-      avatar_url: msg.author.displayAvatarURL({ dynamic: true }),
-      message:
-        msg.content?.trim() || msg.attachments.size > 0
-          ? msg.content || "(Image/GIF attached)"
-          : "(No content)",
-      timestamp: msg.createdTimestamp,
-      attachment_url: msg.attachments.first()?.proxyURL || null,
-      embed_data:
-        msg.embeds.length > 0
-          ? JSON.stringify(msg.embeds.map((e) => e.toJSON()))
-          : null,
-      reactions:
-        msg.reactions.cache.size > 0
-          ? JSON.stringify(
-              msg.reactions.cache.map((r) => ({
-                emoji: r.emoji.name,
-                count: r.count,
-              }))
-            )
-          : null,
-    }));
+    const formatted = messages
+      .map((msg) => {
+        const isSystem =
+          msg.system ||
+          (typeof msg.type === "number" &&
+            msg.type !== 0 &&
+            !msg.content &&
+            !msg.embeds?.length &&
+            !msg.interaction);
 
-    const playerIdsCSV = activePlayers
-      .map((m) => m.replace(/[<@!>]/g, ""))
-      .join(",");
+        const systemText = isSystem ? getSystemMessageDescription(msg) : null;
+
+        if (!msg.author && !systemText) return null;
+
+        return {
+          user_id: isSystem ? "system" : msg.author?.id || "unknown",
+          username: isSystem
+            ? "System Message"
+            : msg.author?.username || "Unknown",
+          avatar_url: isSystem
+            ? "/system-avatar.png"
+            : msg.author?.displayAvatarURL({ dynamic: true }) ||
+              "/bot-avatar.png",
+          message: isSystem
+            ? systemText
+            : msg.content?.trim() ||
+              (msg.attachments.size > 0
+                ? "(Image/GIF attached)"
+                : "(No content)"),
+          timestamp: msg.createdTimestamp,
+          attachment_url: msg.attachments.first()?.url || null,
+          embed_data:
+            msg.embeds.length > 0
+              ? JSON.stringify(msg.embeds.map((e) => e.toJSON()))
+              : null,
+          reactions:
+            msg.reactions.cache.size > 0
+              ? JSON.stringify(
+                  msg.reactions.cache.map((r) => ({
+                    emoji: r.emoji.name,
+                    count: r.count,
+                  }))
+                )
+              : null,
+        };
+      })
+      .filter(Boolean);
+
     const transcriptId = `match_${match_id}_${Date.now()}`;
+    const playerIdsCSV = allPlayers.map((p) => p.playerId).join(",");
 
-    db.run(
+    initialPlayers.sort();
+    interimPlayers.sort();
+    finalPlayers.sort();
+
+    await db.runAsync(
       `INSERT INTO transcripts (
         id, match_id, thread_id, user_id, username, closed_by, closed_by_username,
-        closure_reason, created_at, closed_at, player_ids
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        closure_reason, created_at, closed_at, player_ids,
+        initial_player_ids, interim_player_ids, final_player_ids, platform
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         transcriptId,
         match_id,
@@ -381,11 +608,15 @@ async function generateMatchTranscript(
         createdAt,
         closedAt,
         playerIdsCSV,
+        initialPlayers.join(","),
+        interimPlayers.join(","),
+        finalPlayers.join(","),
+        platform,
       ]
     );
 
     for (const msg of formatted) {
-      db.run(
+      await db.runAsync(
         `INSERT INTO transcript_messages (
           transcript_id, user_id, username, avatar_url, message, timestamp,
           attachment_url, embed_data, reactions
@@ -406,6 +637,7 @@ async function generateMatchTranscript(
 
     const transcriptUrl = `${process.env.TRANSCRIPT_BASE_URL}/${transcriptId}`;
     const formatTime = (t) => `<t:${Math.floor(t / 1000)}:F>`;
+    const durationMin = Math.round(durationMs / 60000);
 
     const embed = new EmbedBuilder()
       .setColor(0xff0000)
@@ -413,16 +645,24 @@ async function generateMatchTranscript(
       .addFields(
         { name: "🆔 Match ID", value: match_id, inline: true },
         { name: "🔒 Closed By", value: `<@${closedBy.id}>`, inline: true },
+        { name: "🧩 Formation", value: formationType, inline: true },
+        { name: "🖥️ Platform", value: platform, inline: true },
         {
-          name: "🎮 Active Players",
-          value: activePlayers.length > 0 ? activePlayers.join(", ") : "None",
+          name: "⏱️ Duration",
+          value: `${durationMin} minute(s)`,
+          inline: true,
         },
         {
-          name: "🚪 Deprecated Players",
-          value:
-            deprecatedPlayers.length > 0
-              ? deprecatedPlayers.join(", ")
-              : "None",
+          name: "👥 Initial Players",
+          value: initialPlayers.map((id) => `<@${id}>`).join(", ") || "None",
+        },
+        {
+          name: "♻️ Interim Players",
+          value: interimPlayers.map((id) => `<@${id}>`).join(", ") || "None",
+        },
+        {
+          name: "✅ Final Players",
+          value: finalPlayers.map((id) => `<@${id}>`).join(", ") || "None",
         },
         {
           name: "🔊 Voice Channel",
@@ -430,16 +670,8 @@ async function generateMatchTranscript(
           inline: true,
         },
         { name: "📄 Reason", value: closureReason },
-        {
-          name: "🕓 Created",
-          value: formatTime(createdAt),
-          inline: true,
-        },
-        {
-          name: "🕓 Closed",
-          value: formatTime(closedAt),
-          inline: true,
-        }
+        { name: "🕓 Created", value: formatTime(createdAt), inline: true },
+        { name: "🕓 Closed", value: formatTime(closedAt), inline: true }
       );
 
     const row = new ActionRowBuilder().addComponents(
@@ -452,15 +684,26 @@ async function generateMatchTranscript(
     const logChannel = thread.guild.channels.cache.get(
       process.env.TRANSCRIPT_CHANNEL_ID
     );
+
     if (logChannel) {
-      logChannel
+      await logChannel
         .send({ embeds: [embed], components: [row] })
-        .catch(console.error);
+        .catch((err) =>
+          logger.warn("Failed to send transcript embed", { error: err.message })
+        );
     } else {
-      console.warn("⚠️ Transcript log channel not found.");
+      logger.warn("Transcript log channel not found", {
+        transcriptId,
+        guildId: thread.guild.id,
+      });
     }
   } catch (error) {
-    console.error("❌ Error generating match transcript:", error);
+    logger.errorWrapper("Error generating match transcript", error, {
+      threadId: thread.id,
+      closedBy: closedBy.username,
+    });
+  } finally {
+    transcriptInProgress.delete(thread.id);
   }
 }
 
@@ -468,18 +711,43 @@ async function fetchAllMessages(channel) {
   const allMessages = [];
   let lastId;
 
-  while (true) {
-    const options = { limit: 100 };
-    if (lastId) options.before = lastId;
+  try {
+    while (true) {
+      const options = { limit: 100 };
+      if (lastId) options.before = lastId;
 
-    const fetched = await channel.messages.fetch(options);
-    if (fetched.size === 0) break;
+      const fetched = await channel.messages.fetch(options);
+      if (fetched.size === 0) break;
 
-    allMessages.push(...fetched.values());
-    lastId = fetched.last().id;
+      const messages = [...fetched.values()];
+      allMessages.push(...messages);
+
+      lastId = messages[messages.length - 1].id;
+    }
+  } catch (error) {
+    logger.errorWrapper("Failed to fetch all messages for transcript", error, {
+      channelId: channel.id,
+    });
   }
 
-  return allMessages.reverse();
+  return allMessages.reverse(); // Oldest → Newest
+}
+
+async function safeSend(thread, content) {
+  try {
+    const exists = await thread.client.channels
+      .fetch(thread.id)
+      .catch(() => null);
+    if (!exists || exists.deleted || thread.archived) return false;
+    await thread.send(content);
+    return true;
+  } catch (err) {
+    logger.warn("⚠️ Failed to send message during async callback", {
+      threadId: thread.id,
+      error: err.message,
+    });
+    return false;
+  }
 }
 
 module.exports = {
@@ -488,4 +756,6 @@ module.exports = {
   cleanupMatches,
   generateMatchTranscript,
   fetchAllMessages,
+  safeSend,
+  getSystemMessageDescription,
 };

@@ -1,41 +1,100 @@
 // utils/playerUtils.js
 const db = require("../database");
+const logger = require("../logger");
 const {
   addToPlayerMatchTime,
   trackLongestMatchTime,
+  addToTotalMatchTime,
 } = require("../utils/playerstatshelper");
+const { clearMentionStrikes } = require("../utils/mentionStrikeManager");
+const { updateGlobalLongestMatch } = require("./botstatshelper");
+const { awardMatchCompletionPoints } = require("./rewardUtils");
+const {
+  isReadyCheckActive,
+  getReadyPlayers,
+} = require("../utils/readyCheckState");
+
+async function getVoiceId(threadId) {
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT voiceChannelId FROM channels WHERE threadId = ?`,
+      [threadId],
+      (err, row) => (err ? reject(err) : resolve(row?.voiceChannelId || null))
+    );
+  });
+}
+
+async function getDiscordThread(threadId) {
+  const client = global.client;
+  if (!client) {
+    logger.warn("⚠️ global.client is not set");
+    return null;
+  }
+
+  const guild = client.guilds.cache.first();
+  if (!guild) {
+    logger.warn("⚠️ No guild found in global.client");
+    return null;
+  }
+
+  let thread = guild.channels.cache.get(threadId);
+
+  if (!thread) {
+    logger.debug(`🔍 Thread ${threadId} not found in cache, trying fetch...`);
+    try {
+      thread = await guild.channels.fetch(threadId);
+      logger.debug(`✅ Successfully fetched thread ${threadId}`);
+    } catch (err) {
+      logger.warn("⚠️ Failed to fetch thread from Discord", {
+        threadId,
+        error: err.message,
+      });
+      return null;
+    }
+  }
+
+  return thread;
+}
 
 async function removePlayerFromMatch(
   playerId,
   threadId,
   finalStatus = "removed"
 ) {
+  let matchId;
+
   try {
-    // Step 1: Get match_id and created_at
-    const matchRow = await new Promise((resolve, reject) => {
-      db.get(
-        `SELECT match_id, created_at FROM matches WHERE thread_id = ?`,
-        [threadId],
-        (err, row) => (err ? reject(err) : resolve(row))
+    logger.info(`🚨 Beginning removal for ${playerId} from thread ${threadId}`);
+
+    const thread = await getDiscordThread(threadId); // ✅ Move this to top
+
+    // 🔍 Match metadata
+    const matchRow = await db.getAsync(
+      `SELECT match_id, match_start_time FROM matches WHERE thread_id = ?`,
+      [threadId]
+    );
+
+    matchId = matchRow?.match_id;
+    const matchStartTime = matchRow?.match_start_time;
+
+    if (!matchId || !matchStartTime) {
+      throw new Error(
+        `Missing match_id or match_start_time for thread ${threadId}`
       );
-    });
+    }
 
-    const matchId = matchRow?.match_id;
-    const createdAt = matchRow?.created_at;
-    if (!matchId) throw new Error("Match ID not found");
+    // 🧹 Cleanup ready check
+    if (isReadyCheckActive(threadId)) {
+      const readyPlayers = getReadyPlayers(threadId);
+      readyPlayers.delete(playerId);
+      logger.info(`🗑️ Removed ${playerId} from active ready check`);
+    }
 
-    const matchDuration = createdAt
-      ? Date.now() - new Date(createdAt).getTime()
-      : null;
-
-    // Step 2: Update channels.playerIds
-    const channelRow = await new Promise((resolve, reject) => {
-      db.get(
-        `SELECT playerIds FROM channels WHERE threadId = ?`,
-        [threadId],
-        (err, row) => (err ? reject(err) : resolve(row))
-      );
-    });
+    // 🔄 Remove player from channels.playerIds
+    const channelRow = await db.getAsync(
+      `SELECT playerIds FROM channels WHERE threadId = ?`,
+      [threadId]
+    );
 
     const updatedPlayerIds =
       channelRow?.playerIds
@@ -48,31 +107,46 @@ async function removePlayerFromMatch(
       threadId,
     ]);
 
-    // Step 3: Reset player queue status
+    // 🔄 Set player status to inactive
     await db.runAsync(
-      `UPDATE players 
-       SET status = 'inactive', platform = 'unknown', duoPartner = NULL, queue_entered_at = NULL 
-       WHERE id = ?`,
+      `UPDATE players SET status = 'inactive', platform = 'unknown', duoPartner = NULL, queue_entered_at = NULL WHERE id = ?`,
       [playerId]
     );
 
-    // Step 4: Update match_players if still active
-    const existingStatusRow = await db.getAsync(
+    // ✅ Only update match_players if currently active
+    const statusRow = await db.getAsync(
       `SELECT status FROM match_players WHERE match_id = ? AND playerId = ?`,
       [matchId, playerId]
     );
 
-    if (existingStatusRow?.status === "active") {
+    if (statusRow?.status === "active") {
       await db.runAsync(
         `UPDATE match_players SET status = ? WHERE match_id = ? AND playerId = ?`,
         [finalStatus, matchId, playerId]
       );
+
+      const duration = Math.floor((Date.now() - matchStartTime) / 1000);
+      await addToPlayerMatchTime(playerId, duration);
+      await trackLongestMatchTime(playerId, duration);
+      await addToTotalMatchTime(duration);
+      await updateGlobalLongestMatch(duration);
+
+      // 🏅 Early completion point (30+ minutes)
+      const matchStart = Number(matchStartTime);
+      if (matchStart) {
+        await awardMatchCompletionPoints(
+          matchId,
+          matchStart,
+          false,
+          playerId,
+          thread?.guild // ✅ Now safe
+        );
+      }
     }
 
-    // Step 5: Log match_event
+    // 📝 Log event
     await db.runAsync(
-      `INSERT INTO match_events 
-       (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
+      `INSERT INTO match_events (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         matchId,
@@ -85,57 +159,105 @@ async function removePlayerFromMatch(
       ]
     );
 
-    // Step 6: Update stats
-    if (matchDuration && matchDuration > 60000) {
-      await Promise.all([
-        addToPlayerMatchTime(playerId, matchDuration),
-        trackLongestMatchTime(playerId, matchDuration),
-      ]);
+    clearMentionStrikes(playerId, { threadId });
+
+    // 🎯 Remove from thread + VC
+    if (thread?.isThread() && !thread.archived) {
+      try {
+        const member = await thread.members.fetch(playerId).catch(() => null);
+        if (member) {
+          await thread.members.remove(playerId);
+          logger.info(`🚪 Removed ${playerId} from thread ${threadId}`);
+        }
+
+        const voiceChannelId = await db
+          .getAsync(`SELECT voiceChannelId FROM channels WHERE threadId = ?`, [
+            threadId,
+          ])
+          .then((row) => row?.voiceChannelId);
+
+        const vc = thread.guild.channels.cache.get(voiceChannelId);
+        if (vc) {
+          await vc.permissionOverwrites
+            .edit(playerId, {
+              ViewChannel: false,
+              Connect: false,
+              Speak: false,
+            })
+            .catch((err) =>
+              logger.warn("⚠️ VC permission overwrite failed", {
+                playerId,
+                voiceChannelId,
+                error: err.message,
+              })
+            );
+
+          const vcMember = vc.members.get(playerId);
+          if (vcMember?.voice?.disconnect) {
+            await vcMember.voice.disconnect().catch((err) =>
+              logger.warn("⚠️ VC disconnect failed", {
+                playerId,
+                voiceChannelId,
+                error: err.message,
+              })
+            );
+          }
+        }
+      } catch (err) {
+        logger.warn("⚠️ Failed to remove from thread or VC", {
+          threadId,
+          playerId,
+          error: err.message,
+        });
+      }
     }
 
-    console.info(
-      `✅ Removed player ${playerId} from match ${matchId} as ${finalStatus}`
+    logger.info(
+      `✅ Removed ${playerId} from match ${matchId} as ${finalStatus}`
     );
   } catch (err) {
-    console.error(
-      `❌ Error in removePlayerFromMatch(${playerId}):`,
-      err.message
-    );
+    logger.errorWrapper("removePlayerFromMatch", err, { playerId, threadId });
     throw err;
+  } finally {
+    if (matchId) {
+      await db.runAsync(
+        `UPDATE match_players SET leave_in_progress = 0 WHERE match_id = ? AND playerId = ?`,
+        [matchId, playerId]
+      );
+    }
   }
 }
 
 async function getPlayerById(playerId, fields = "*") {
   try {
+    if (fields !== "*" && typeof fields !== "string") {
+      throw new Error("Invalid field selection for getPlayerById");
+    }
+
     return await new Promise((resolve, reject) => {
       db.get(
         `SELECT ${fields} FROM players WHERE id = ?`,
         [playerId],
         (err, row) => {
           if (err) {
-            console.error(
-              `Error fetching player ${playerId} from database:`,
-              err.message
-            );
+            logger.errorWrapper("getPlayerById", err, { playerId, fields });
             return reject(err);
           }
-          resolve(row || null); // Return null if no player is found
+
+          if (!row) {
+            logger.debug(`ℹ️ No player found with ID ${playerId}`);
+            return resolve(null);
+          }
+
+          resolve(row);
         }
       );
     });
-  } catch (error) {
-    console.error(
-      `Unexpected error in getPlayerById(${playerId}):`,
-      error.message
-    );
+  } catch (err) {
+    logger.errorWrapper("getPlayerById_outer", err, { playerId });
     throw new Error("Failed to fetch player data from the database.");
   }
 }
-
-module.exports = {
-  getPlayerById,
-  // include other player-related utils here
-};
 
 async function getQueuePosition(playerId, platform) {
   return new Promise((resolve, reject) => {
@@ -144,7 +266,7 @@ async function getQueuePosition(playerId, platform) {
       [platform],
       (err, queue) => {
         if (err) {
-          console.error("❌ SQL error fetching queue position:", err.message);
+          logger.errorWrapper("getQueuePosition", err, { platform });
           return reject(err);
         }
 
@@ -155,44 +277,37 @@ async function getQueuePosition(playerId, platform) {
           (player) => String(player.id) === normalizedPlayerId
         );
 
-        if (playerIndex === -1) return resolve(1);
-
-        return resolve(playerIndex + 1);
+        return resolve(playerIndex === -1 ? 1 : playerIndex + 1);
       }
     );
   });
 }
 
-async function calculateAverageQueueTime(platform, queueType) {
+async function calculateAverageQueueTime(platform, queueType = "solo") {
+  const soloClause =
+    "duoPartner IS NULL AND trioPartner1 IS NULL AND trioPartner2 IS NULL";
+  const duoClause = "duoPartner IS NOT NULL";
+  const whereClause = queueType === "solo" ? soloClause : duoClause;
+
   return new Promise((resolve, reject) => {
     db.all(
-      `
-      SELECT (queue_left_at - queue_entered_at) AS wait_time
-      FROM player_statistics
-      WHERE platform = ? 
-      AND queue_entered_at IS NOT NULL 
-      AND queue_left_at IS NOT NULL 
-      AND status = 'completed'
-      AND duoPartner IS ${queueType === "solo" ? "NULL" : "NOT NULL"}
-      AND (queue_left_at - queue_entered_at) > 60000
-      AND (queue_left_at - queue_entered_at) < 1800000
-      ORDER BY queue_left_at DESC
-      LIMIT 20
-      `,
+      `SELECT (queue_left_at - queue_entered_at) AS wait_time
+       FROM queue_history
+       WHERE platform = ?
+         AND queue_entered_at IS NOT NULL
+         AND queue_left_at IS NOT NULL
+         AND ${whereClause}
+         AND (queue_left_at - queue_entered_at) > 60000
+         AND (queue_left_at - queue_entered_at) < 1800000
+       ORDER BY queue_left_at DESC
+       LIMIT 20`,
       [platform],
       (err, rows) => {
-        if (err) {
-          console.error("Error calculating average queue time:", err.message);
-          return reject(err);
-        }
-
-        if (rows.length === 0) {
-          return resolve(0);
-        }
+        if (err) return reject(err);
+        if (!rows.length) return resolve(0);
 
         const totalTime = rows.reduce((sum, row) => sum + row.wait_time, 0);
-        const avgTime = totalTime / rows.length;
-        resolve(avgTime);
+        resolve(totalTime / rows.length);
       }
     );
   });
@@ -200,22 +315,23 @@ async function calculateAverageQueueTime(platform, queueType) {
 
 async function isPlayerInServer(playerId, client) {
   try {
-    if (!client || !client.guilds?.cache) {
-      console.error("❌ Client or guilds cache not available");
+    if (!client?.guilds?.cache) {
+      logger.warn("isPlayerInServer: Client or guilds cache unavailable", {
+        playerId,
+      });
       return false;
     }
 
     const guild = client.guilds.cache.first();
     if (!guild) {
-      console.warn("❌ No guilds available");
+      logger.warn("isPlayerInServer: No guilds available", { playerId });
       return false;
     }
 
-    await guild.members.fetch(); // Refresh cache
+    await guild.members.fetch();
     return guild.members.cache.has(playerId);
-  } catch (error) {
-    console.error("❌ Error checking server membership:", {
-      message: error.message,
+  } catch (err) {
+    logger.errorWrapper("isPlayerInServer", err, {
       playerId,
       clientStatus: {
         isReady: client?.isReady?.(),
@@ -232,22 +348,18 @@ async function prioritizePlatformsByQueueTime() {
 
   for (const platform of platforms) {
     try {
-      platformWaitTimes[platform] = await calculateAverageQueueTime(
-        platform,
-        "solo"
-      );
+      const avg = await calculateAverageQueueTime(platform, "solo");
+      platformWaitTimes[platform] = avg;
     } catch (err) {
-      console.error(
-        `Error calculating wait time for ${platform}:`,
-        err.message
-      );
+      logger.errorWrapper("prioritizePlatformsByQueueTime", err, { platform });
       platformWaitTimes[platform] = 0;
     }
   }
 
-  // Sort platforms descending by wait time
+  // Sort platforms with highest average wait time first
   platforms.sort((a, b) => platformWaitTimes[b] - platformWaitTimes[a]);
 
+  logger.info("📊 Platform wait times (ms):", platformWaitTimes);
   return platforms;
 }
 

@@ -1,5 +1,8 @@
+// utils/nukeUtils.js
 const { ChannelType } = require("discord.js");
 const db = require("../database");
+const logger = require("../logger");
+
 async function deleteBotThreadsAndVoiceChannels(guild) {
   try {
     const allThreads = await guild.channels.fetchActiveThreads();
@@ -10,14 +13,15 @@ async function deleteBotThreadsAndVoiceChannels(guild) {
     );
 
     for (const thread of botThreads.values()) {
-      await thread
-        .delete("Nuke command executed")
-        .catch((err) =>
-          console.error(
-            `Failed to delete thread (${thread.name}):`,
-            err.message
-          )
-        );
+      try {
+        await thread.delete("Nuke command executed");
+        logger.info(`🧨 Deleted thread: ${thread.name}`);
+      } catch (err) {
+        logger.errorWrapper("deleteBotThread", err, {
+          threadId: thread.id,
+          threadName: thread.name,
+        });
+      }
     }
 
     const botVoiceChannels = guild.channels.cache.filter(
@@ -28,24 +32,22 @@ async function deleteBotThreadsAndVoiceChannels(guild) {
     );
 
     for (const voiceChannel of botVoiceChannels.values()) {
-      await voiceChannel
-        .delete("Nuke command executed")
-        .catch((err) =>
-          console.error(
-            `Failed to delete voice channel (${voiceChannel.name}):`,
-            err.message
-          )
-        );
+      try {
+        await voiceChannel.delete("Nuke command executed");
+        logger.info(`🔊 Deleted voice channel: ${voiceChannel.name}`);
+      } catch (err) {
+        logger.errorWrapper("deleteBotVoiceChannel", err, {
+          channelId: voiceChannel.id,
+          channelName: voiceChannel.name,
+        });
+      }
     }
 
-    console.info(
+    logger.info(
       "✅ All matchmaking-related threads and voice channels deleted."
     );
-  } catch (error) {
-    console.error(
-      "❌ Error deleting matchmaking-related threads and voice channels:",
-      error.message
-    );
+  } catch (err) {
+    logger.errorWrapper("deleteBotThreadsAndVoiceChannels", err);
     throw new Error(
       "Failed to delete bot-created matchmaking threads and voice channels."
     );
@@ -68,17 +70,18 @@ async function clearDatabaseTables() {
       await new Promise((resolve, reject) => {
         db.run(`DELETE FROM ${table}`, (err) => {
           if (err) {
-            console.error(`❌ Error clearing ${table} table:`, err.message);
+            logger.errorWrapper("clearDatabaseTable", err, { table });
             return reject(err);
           }
+          logger.info(`🗑️ Cleared table: ${table}`);
           resolve();
         });
       });
     }
 
-    console.info("✅ All matchmaking-related data successfully cleared.");
-  } catch (error) {
-    console.error("❌ Error clearing database tables:", error.message);
+    logger.info("✅ All matchmaking-related database tables cleared.");
+  } catch (err) {
+    logger.errorWrapper("clearDatabaseTables", err);
     throw new Error("Failed to clear database tables.");
   }
 }

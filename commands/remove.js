@@ -1,6 +1,9 @@
-const { SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
+// commands/remove.js
+const { SlashCommandBuilder } = require("discord.js");
 const { hasModRole } = require("../utils/permissions");
 const db = require("../database");
+const { removePlayerFromMatch } = require("../utils/playerUtils");
+const logger = require("../logger");
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -30,18 +33,26 @@ module.exports = {
     }
 
     try {
-      // Get match_id
-      const matchInfo = await new Promise((resolve, reject) => {
-        db.get(
+      let matchInfo;
+      try {
+        matchInfo = await db.getAsync(
           `SELECT matches.match_id, voiceChannelId FROM matches 
            JOIN channels ON matches.thread_id = channels.threadId 
            WHERE matches.thread_id = ?`,
-          [thread.id],
-          (err, row) => (err ? reject(err) : resolve(row))
+          [thread.id]
         );
-      });
+      } catch (err) {
+        logger.errorWrapper("DB error fetching match info in /remove", err, {
+          threadId: thread.id,
+          playerId,
+        });
+        return interaction.reply({
+          content: "❌ Failed to retrieve match data.",
+          flags: 64,
+        });
+      }
 
-      const { match_id, voiceChannelId } = matchInfo || {};
+      const { match_id } = matchInfo || {};
       if (!match_id) {
         return interaction.reply({
           content: "❌ This thread is not part of an active match.",
@@ -49,80 +60,84 @@ module.exports = {
         });
       }
 
-      // ✅ Concurrency check
-      const isInProgress = await new Promise((resolve, reject) => {
-        db.get(
+      let isInProgress;
+      try {
+        isInProgress = await db.getAsync(
           `SELECT leave_in_progress FROM match_players WHERE match_id = ? AND playerId = ?`,
-          [match_id, playerId],
-          (err, row) =>
-            err ? reject(err) : resolve(row?.leave_in_progress === 1)
+          [match_id, playerId]
         );
-      });
+      } catch (err) {
+        logger.errorWrapper(
+          "DB error checking leave_in_progress in /remove",
+          err,
+          {
+            match_id,
+            playerId,
+          }
+        );
+        return interaction.reply({
+          content: "❌ Could not verify player status.",
+          flags: 64,
+        });
+      }
 
-      if (isInProgress) {
+      if (isInProgress?.leave_in_progress === 1) {
         return interaction.reply({
           content: "⚠️ This player is already being removed.",
           flags: 64,
         });
       }
 
-      // ✅ Set leave_in_progress = 1
-      await db.run(
-        `UPDATE match_players SET leave_in_progress = 1 WHERE match_id = ? AND playerId = ?`,
-        [match_id, playerId]
-      );
-
-      // ✅ Update match_players
-      await db.run(
-        `UPDATE match_players SET status = 'removed' WHERE match_id = ? AND playerId = ?`,
-        [match_id, playerId]
-      );
-
-      // ✅ Log match event with final_status
-      await db.run(
-        `INSERT INTO match_events (match_id, threadId, playerId, eventType, timestamp, reason, final_status)
-         VALUES (?, ?, ?, 'kick', ?, ?, ?)`,
-        [
-          match_id,
-          thread.id,
-          playerId,
-          Date.now(),
-          "Removed via /remove",
-          "removed_by_moderator",
-        ]
-      );
-
-      // ✅ Remove from players table
-      await db.run(`DELETE FROM players WHERE id = ?`, [playerId]);
-
-      // ✅ Remove from thread
-      await thread.members.remove(playerId).catch(() => {});
-
-      // ✅ Remove from VC
-      if (voiceChannelId) {
-        const vc = thread.guild.channels.cache.get(voiceChannelId);
-        if (vc) {
-          await vc.permissionOverwrites
-            .edit(playerId, {
-              ViewChannel: false,
-              Connect: false,
-            })
-            .catch(() => {});
-        }
+      try {
+        await db.runAsync(
+          `UPDATE match_players SET leave_in_progress = 1 WHERE match_id = ? AND playerId = ?`,
+          [match_id, playerId]
+        );
+      } catch (err) {
+        logger.errorWrapper(
+          "DB error setting leave_in_progress in /remove",
+          err,
+          {
+            match_id,
+            playerId,
+          }
+        );
+        return interaction.reply({
+          content: "❌ Failed to lock player for removal.",
+          flags: 64,
+        });
       }
 
-      // ✅ Reset leave_in_progress
-      await db.run(
-        `UPDATE match_players SET leave_in_progress = 0 WHERE match_id = ? AND playerId = ?`,
-        [match_id, playerId]
-      );
+      try {
+        await removePlayerFromMatch(
+          playerId,
+          thread.id,
+          "removed_by_moderator"
+        );
+      } catch (err) {
+        logger.errorWrapper(
+          "Error in removePlayerFromMatch during /remove",
+          err,
+          {
+            match_id,
+            playerId,
+          }
+        );
+        return interaction.reply({
+          content: "❌ Failed to remove the player from the match.",
+          flags: 64,
+        });
+      }
 
       return interaction.reply({
         content: `✅ <@${playerId}> has been removed from the match and stripped of access. Please use /search to attempt to replace this player from the queue if desired.`,
         flags: 64,
       });
     } catch (error) {
-      console.error("❌ Error in /remove:", error);
+      logger.errorWrapper("❌ Error in /remove", error, {
+        playerId,
+        threadId: thread?.id,
+      });
       return interaction.reply({
         content: "❌ An error occurred while removing the user.",
         flags: 64,

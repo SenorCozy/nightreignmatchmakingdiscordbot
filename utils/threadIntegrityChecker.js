@@ -10,15 +10,11 @@ async function checkThreadIntegrity(client) {
 
   let matchThreads = [];
   try {
-    matchThreads = await new Promise((resolve, reject) => {
-      db.all(
-        `SELECT m.match_id, m.thread_id, c.voiceChannelId 
-         FROM matches m
-         LEFT JOIN channels c ON m.thread_id = c.threadId`,
-        [],
-        (err, rows) => (err ? reject(err) : resolve(rows || []))
-      );
-    });
+    matchThreads = await db.allAsync(`
+      SELECT m.match_id, m.thread_id, c.voiceChannelId 
+      FROM matches m
+      LEFT JOIN channels c ON m.thread_id = c.threadId
+    `);
   } catch (error) {
     logger.errorWrapper("ThreadIntegrity_LoadMatchThreads", error);
     return;
@@ -38,14 +34,12 @@ async function checkThreadIntegrity(client) {
       const membersInThread = await thread.members.fetch();
       const activePlayerIds = membersInThread.map((m) => m.id);
 
-      const expectedPlayers = await new Promise((resolve, reject) => {
-        db.all(
+      const expectedPlayers = await db
+        .allAsync(
           `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
-          [match_id],
-          (err, rows) =>
-            err ? reject(err) : resolve(rows.map((r) => r.playerId))
-        );
-      });
+          [match_id]
+        )
+        .then((rows) => rows.map((r) => r.playerId));
 
       for (const playerId of expectedPlayers) {
         if (!activePlayerIds.includes(playerId)) {
@@ -72,79 +66,36 @@ async function checkThreadIntegrity(client) {
           }
 
           try {
-            const isLeaving = await new Promise((resolve, reject) => {
-              db.get(
-                `SELECT leave_in_progress FROM match_players WHERE match_id = ? AND playerId = ?`,
-                [match_id, playerId],
-                (err, row) =>
-                  err ? reject(err) : resolve(row?.leave_in_progress === 1)
-              );
-            });
+            const isLeaving = await db.getAsync(
+              `SELECT leave_in_progress FROM match_players WHERE match_id = ? AND playerId = ?`,
+              [match_id, playerId]
+            );
 
-            if (isLeaving) {
+            if (isLeaving?.leave_in_progress === 1) {
               logger.info(
                 `⏭️ Skipping ${playerId} — leave already in progress.`
               );
               continue;
             }
 
-            await db.run(
+            await db.runAsync(
               `UPDATE match_players SET leave_in_progress = 1 WHERE match_id = ? AND playerId = ?`,
               [match_id, playerId]
             );
 
-            await db.run(
-              `UPDATE match_players SET status = 'removed' WHERE match_id = ? AND playerId = ?`,
-              [match_id, playerId]
+            // ✅ Centralized cleanup handles everything
+            await removePlayerFromMatch(
+              playerId,
+              thread.id,
+              `left_match (${statusReason})`
             );
 
-            await db.run(
-              `INSERT INTO match_events (match_id, threadId, playerId, eventType, timestamp, reason)
-               VALUES (?, ?, ?, 'leave', ?, ?)`,
-              [
-                match_id,
-                thread.id,
-                playerId,
-                now,
-                `Integrity check: ${statusReason}`,
-              ]
-            );
-
-            await removePlayerFromMatch(playerId, thread.id).catch((e) => {
-              logger.warn(
-                `removePlayerFromMatch failed for ${playerId}: ${e.message}`
-              );
-            });
-
-            if (voiceChannelId) {
-              const vc = thread.guild.channels.cache.get(voiceChannelId);
-              if (vc) {
-                await vc.permissionOverwrites
-                  .edit(playerId, {
-                    ViewChannel: false,
-                    Connect: false,
-                  })
-                  .catch(() => {});
-                const member = vc.members.get(playerId);
-                if (member?.voice) {
-                  await member.voice.disconnect().catch(() => {});
-                }
-              }
-            }
-
-            await db.run(
-              `UPDATE match_players SET leave_in_progress = 0 WHERE match_id = ? AND playerId = ?`,
-              [match_id, playerId]
-            );
-
-            const remaining = await new Promise((resolve, reject) => {
-              db.all(
+            const remaining = await db
+              .allAsync(
                 `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
-                [match_id],
-                (err, rows) =>
-                  err ? reject(err) : resolve(rows.map((r) => r.playerId))
-              );
-            });
+                [match_id]
+              )
+              .then((rows) => rows.map((r) => r.playerId));
 
             if (remaining.length === 0) {
               await cleanupMatch({ thread, voiceChannelId });

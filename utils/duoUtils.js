@@ -1,42 +1,64 @@
-// utils/duoUtils.js
 const { getPlayerById } = require("./playerUtils");
+const sendQueueStatusPrompt = require("./sendQueueStatusPrompt");
 const db = require("../database");
-async function handleOrphanedDuos(playerId) {
-  const player = await getPlayerById(playerId);
-  if (!player || !player.duoPartner) return;
+const logger = require("../logger");
 
-  const partnerStillQueued = await new Promise((resolve, reject) => {
-    db.get(
-      `SELECT id FROM players WHERE id = ? AND status = 'queued'`,
-      [player.duoPartner],
-      (err, row) => {
-        if (err) {
-          console.error("Error checking duo partner status:", err.message);
-          return reject(err);
-        }
-        resolve(!!row);
-      }
-    );
-  });
+async function handleOrphanedDuos(playerId, guild) {
+  try {
+    const player = await getPlayerById(playerId);
+    if (!player?.duoPartner) return;
 
-  if (!partnerStillQueued) {
-    await new Promise((resolve, reject) => {
-      db.run(
-        `UPDATE players SET duoPartner = NULL WHERE id = ?`,
-        [playerId],
-        (err) => {
+    const partnerId = player.duoPartner;
+
+    const partnerStatus = await new Promise((resolve, reject) => {
+      db.get(
+        `SELECT status FROM players WHERE id = ?`,
+        [partnerId],
+        (err, row) => {
           if (err) {
-            console.error("Error clearing orphaned duo partner:", err.message);
+            logger.errorWrapper("handleOrphanedDuos_checkPartner", err, {
+              playerId,
+              partnerId,
+            });
             return reject(err);
           }
-          resolve();
+          resolve(row?.status || null);
         }
       );
     });
 
-    console.info(
-      `✅ Duo partner removed for ${playerId} (partner no longer queued)`
-    );
+    if (partnerStatus !== "queued") {
+      await new Promise((resolve, reject) => {
+        db.run(
+          `UPDATE players SET duoPartner = NULL WHERE id = ?`,
+          [playerId],
+          (err) => {
+            if (err) {
+              logger.errorWrapper("handleOrphanedDuos_clearLink", err, {
+                playerId,
+              });
+              return reject(err);
+            }
+            resolve();
+          }
+        );
+      });
+
+      logger.info("🧹 Orphaned duo partner removed", {
+        playerId,
+        orphanedPartnerId: partnerId,
+      });
+
+      // 📨 Notify the remaining partner
+      await sendQueueStatusPrompt(guild, partnerId, "duo");
+    } else {
+      logger.debug("✅ Duo partner still queued — no action needed", {
+        playerId,
+        partnerId,
+      });
+    }
+  } catch (err) {
+    logger.errorWrapper("handleOrphanedDuos_outer", err, { playerId });
   }
 }
 

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Match Transcripts</title>
+    <link rel="stylesheet" href="/transcripts.css" />
+  </head>
+  <body>
+    <nav class="navbar">
+      <ul>
+        <li><a href="/dashboard">🏠 Dashboard</a></li>
+        <li><a href="/transcripts" class="active">📜 Transcripts</a></li>
+      </ul>
+    </nav>
+
+    <div class="container">
+      <h1>📜 Match Transcripts</h1>
+
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Created</th>
+            <th>Closed</th>
+            <th>Reason</th>
+            <th>Platform</th>
+            <th>Players</th>
+            <th>View</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% transcripts.forEach((t, index) => { %>
+          <tr>
+            <td><%= totalCount - offset - index %></td>
+            <td><%= new Date(t.created_at).toLocaleString() %></td>
+            <td><%= new Date(t.closed_at).toLocaleString() %></td>
+            <td><%= t.closure_reason || "N/A" %></td>
+            <td><%= t.platform || "Unknown" %></td>
+            <td>
+              <strong>Initial:</strong> <%= t.initial_player_ids || "N/A" %><br />
+              <strong>Interim:</strong> <%= t.interim_player_ids || "None" %><br />
+              <strong>Final:</strong> <%= t.final_player_ids || "None" %>
+            </td>
+
+            <td>
+              <a class="transcript-view" href="/transcripts/<%= t.id %>"
+                >🔍 View</a
+              >
+            </td>
+          </tr>
+          <% }) %>
+        </tbody>
+      </table>
+
+      <div class="pagination">
+        <% if (page > 1) { %>
+        <a href="/transcripts?page=<%= page - 1 %>" class="page-btn">⬅ Prev</a>
+        <% } %>
+        <span>Page <%= page %></span>
+        <% if (hasNextPage) { %>
+        <a href="/transcripts?page=<%= page + 1 %>" class="page-btn">Next ➡</a>
+        <% } %>
+      </div>
+    </div>
+  </body>
+</html>
