@@ -6,6 +6,7 @@ const {
   hasCooldownActive,
   hasReceivedTooManyToday,
   applyMvpAward,
+  hasExceededPerMatchLimit,
 } = require("../utils/mvpUtils");
 const db = require("../database");
 const logger = require("../logger");
@@ -70,33 +71,32 @@ module.exports = {
           });
         }
 
-        const [oldEnough, givenTooMany, cooldown, receivedTooMany] =
-          await Promise.all([
-            // isMatchOldEnough(matchId),
-            // hasGivenTooManyToday(giverId),
-            hasCooldownActive(giverId, receiverId),
-            hasReceivedTooManyToday(receiverId),
-          ]);
+        const [
+          oldEnough,
+          givenTooMany,
+          receivedTooMany,
+          cooldown,
+          exceededMatchCap,
+        ] = await Promise.all([
+          isMatchOldEnough(matchId),
+          hasGivenTooManyToday(giverId),
+          hasReceivedTooManyToday(receiverId),
+          hasCooldownActive(giverId, receiverId, matchId),
+          hasExceededPerMatchLimit(giverId, receiverId, matchId),
+        ]);
 
-        // if (!oldEnough) {
-        //   return interaction.reply({
-        //     content:
-        //       "⏱️ You can only award MVPs after 15 minutes into a match.",
-        //     flags: 64,
-        //   });
-        // }
-
-        // if (givenTooMany) {
-        //   return interaction.reply({
-        //     content: "🖐️ You've reached the daily MVP award limit (5 per 24h).",
-        //     flags: 64,
-        //   });
-        // }
-
-        if (cooldown) {
-          await unlockAchievementIfNotEarned(giverId, "mvp_cooldown_abuse");
+        if (!oldEnough) {
           return interaction.reply({
-            content: `⏳ You must wait 25 minutes before giving MVP to <@${receiverId}> again.`,
+            content:
+              "⏱️ You can only award MVPs after 15 minutes into a match.",
+            flags: 64,
+          });
+        }
+
+        if (givenTooMany) {
+          return interaction.reply({
+            content:
+              "🖐️ You've reached the daily MVP award limit (20 per 24h).",
             flags: 64,
           });
         }
@@ -104,6 +104,21 @@ module.exports = {
         if (receivedTooMany) {
           return interaction.reply({
             content: `📥 <@${receiverId}> has reached their daily MVP receive limit (10 per 24h).`,
+            flags: 64,
+          });
+        }
+
+        if (exceededMatchCap) {
+          return interaction.reply({
+            content: `🚫 You've already awarded <@${receiverId}> the maximum 3 MVPs in this match.`,
+            flags: 64,
+          });
+        }
+
+        if (cooldown) {
+          await unlockAchievementIfNotEarned(giverId, "mvp_cooldown_abuse");
+          return interaction.reply({
+            content: `⏳ You must wait 30 minutes before giving MVP to <@${receiverId}> again in this match.`,
             flags: 64,
           });
         }

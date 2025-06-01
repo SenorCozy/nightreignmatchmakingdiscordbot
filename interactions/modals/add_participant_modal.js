@@ -2,7 +2,7 @@ const db = require("../../database");
 const logger = require("../../logger");
 
 module.exports = {
-  customId: /^add_participant_modal_/,
+  customIdRegex: /^add_participant_modal_/,
   async execute(interaction) {
     const submissionId = interaction.customId.split("_").slice(-1)[0];
     const input = interaction.fields.getTextInputValue("participant_ids");
@@ -19,7 +19,7 @@ module.exports = {
     if (matchedIds.length === 0) {
       return interaction.reply({
         content: "❌ No valid user IDs or mentions found.",
-        ephemeral: true,
+        flags: 64,
       });
     }
 
@@ -55,7 +55,7 @@ module.exports = {
       content: `✅ Added ${successCount} participant(s). ${
         skipped.length ? `Skipped: ${skipped.join(", ")}` : ""
       }`,
-      ephemeral: true,
+      flags: 64,
     });
   },
 };

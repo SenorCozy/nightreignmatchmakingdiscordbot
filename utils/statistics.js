@@ -45,52 +45,57 @@ async function updateQueueStatistics(
   try {
     await new Promise((resolve, reject) => {
       db.run(
-        `INSERT INTO player_statistics (
+        `
+        INSERT INTO player_statistics (
           id, queue_entries, queue_entries_solo, queue_entries_duo, queue_entries_trio,
           ${platformColumn}
-        ) VALUES (?, 0, 0, 0, 0, 0)  -- inserts all 0s if new
-ON CONFLICT(id) DO UPDATE SET 
-  queue_entries = queue_entries + 1,
-  queue_entries_solo = queue_entries_solo + ?,
-  queue_entries_duo = queue_entries_duo + ?,
-  queue_entries_trio = queue_entries_trio + ?,
-  ${platformColumn} = ${platformColumn} + 1
-`,
-        [playerId, soloIncrement, duoIncrement, trioIncrement],
-
+        ) VALUES (?, 1, ?, ?, ?, 1)
+        ON CONFLICT(id) DO UPDATE SET 
+          queue_entries = queue_entries + 1,
+          queue_entries_solo = queue_entries_solo + ?,
+          queue_entries_duo = queue_entries_duo + ?,
+          queue_entries_trio = queue_entries_trio + ?,
+          ${platformColumn} = ${platformColumn} + 1
+        `,
+        [
+          playerId,
+          soloIncrement,
+          duoIncrement,
+          trioIncrement,
+          soloIncrement,
+          duoIncrement,
+          trioIncrement,
+        ],
         (err) => (err ? reject(err) : resolve())
       );
-    });
-    logger.debug("🎯 queue stat increments", {
-      playerId,
-      soloIncrement,
-      duoIncrement,
-      trioIncrement,
     });
 
     logger.info(
       `📊 Updated queue statistics for ${playerId} (${formationType})`
     );
 
-    await unlockStatThresholdAchievements(
-      playerId,
-      "queue_entries",
-      allQueueEntryAchievements
-    );
+    // 🔐 Safely delay unlocks by one tick to ensure visibility
+    setImmediate(async () => {
+      await unlockStatThresholdAchievements(
+        playerId,
+        "queue_entries",
+        allQueueEntryAchievements
+      );
 
-    if (formationType === "duo") {
-      await unlockStatThresholdAchievements(
-        playerId,
-        "queue_entries_duo",
-        duoQueueAchievements
-      );
-    } else if (formationType === "trio") {
-      await unlockStatThresholdAchievements(
-        playerId,
-        "queue_entries_trio",
-        trioQueueAchievements
-      );
-    }
+      if (formationType === "duo") {
+        await unlockStatThresholdAchievements(
+          playerId,
+          "queue_entries_duo",
+          duoQueueAchievements
+        );
+      } else if (formationType === "trio") {
+        await unlockStatThresholdAchievements(
+          playerId,
+          "queue_entries_trio",
+          trioQueueAchievements
+        );
+      }
+    });
   } catch (error) {
     logger.errorWrapper("UpdateQueueStatistics", error, { playerId });
   }

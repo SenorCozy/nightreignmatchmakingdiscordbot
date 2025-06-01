@@ -7,6 +7,7 @@ const buttonHandlers = new Map();
 const regexHandlers = [];
 const commandHandlers = new Map();
 const modalHandlers = new Map();
+const regexModalHandlers = [];
 
 // Load modal handlers
 const modalPath = path.join(__dirname, "modals");
@@ -20,6 +21,12 @@ if (fs.existsSync(modalPath)) {
     if (modal?.customId && typeof modal.execute === "function") {
       modalHandlers.set(modal.customId, modal.execute);
       logger.info(`📥 Registered modal: ${modal.customId}`);
+    } else if (modal?.customIdRegex && typeof modal.execute === "function") {
+      regexModalHandlers.push({
+        ...modal,
+        regex: modal.customIdRegex,
+      });
+      logger.info(`📥 Registered regex modal handler: ${modal.customIdRegex}`);
     }
   }
 }
@@ -76,6 +83,7 @@ module.exports = async (interaction) => {
 
       return await interaction.respond(filtered);
     }
+
     if (interaction.isButton()) {
       const customId = interaction.customId.toLowerCase();
 
@@ -100,14 +108,25 @@ module.exports = async (interaction) => {
         });
       }
     } else if (interaction.isModalSubmit()) {
-      const handler = modalHandlers.get(interaction.customId);
-      if (handler) {
-        return await handler(interaction);
-      } else {
-        logger.warn("⚠️ No modal handler found", {
+      const exact = modalHandlers.get(interaction.customId);
+      if (exact) {
+        return await exact(interaction);
+      }
+
+      const matched = regexModalHandlers.find((m) =>
+        m.regex.test(interaction.customId)
+      );
+
+      if (matched) {
+        logger.info("📥 Routed to regex modal handler", {
           customId: interaction.customId,
         });
+        return await matched.execute(interaction);
       }
+
+      logger.warn("⚠️ No modal handler found", {
+        customId: interaction.customId,
+      });
     }
   } catch (error) {
     logger.errorWrapper("❌ Error handling interaction", error, {

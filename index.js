@@ -1,10 +1,10 @@
 require("dotenv").config();
+require("./logFlusher");
+
 const db = require("./database.js");
 const fs = require("fs");
 const path = require("path");
 const logger = require("./logger");
-require("./logFlusher");
-const FormData = require("form-data");
 
 const { setupRecurringEventHandler } = require("./utils/eventUtils");
 
@@ -168,7 +168,10 @@ setInterval(() => cleanupMatches(client), 10000);
 // Run every 5 minutes CHANGE BACK!!
 setupRecurringEventHandler();
 
-setInterval(() => checkThreadIntegrity(client), 10000); // 3 minutes CHANGE BACK
+setTimeout(() => {
+  setInterval(() => checkThreadIntegrity(client), 480000); // runs every 10s
+}, 30000); // wait 30s before starting the loop
+// 3 minutes CHANGE BACK
 
 // STATISTICS
 // Player statistics

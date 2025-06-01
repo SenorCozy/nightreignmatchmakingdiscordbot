@@ -20,12 +20,22 @@ async function checkThreadIntegrity(client) {
     return;
   }
 
-  const threads = matchThreads
-    .map((row) => {
-      const thread = guild.channels.cache.get(row.thread_id);
-      return thread ? { ...row, thread } : null;
-    })
-    .filter(Boolean);
+  const threads = [];
+
+  for (const row of matchThreads) {
+    let thread = null;
+
+    try {
+      thread = await client.channels.fetch(row.thread_id);
+    } catch (err) {
+      logger.warn(`⚠️ Could not fetch thread ${row.thread_id}`);
+      continue;
+    }
+
+    if (thread?.isThread?.()) {
+      threads.push({ ...row, thread });
+    }
+  }
 
   logger.info(`🔍 Running thread integrity check on ${threads.length} threads`);
 

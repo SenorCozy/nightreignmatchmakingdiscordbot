@@ -14,7 +14,7 @@ const MODERATOR_ROLE_IDS = [
 ].filter(Boolean);
 
 module.exports = {
-  customIdregex: /^approve_submission_/,
+  customIdRegex: /^approve_submission_/,
   async execute(interaction) {
     try {
       const member = await interaction.guild.members.fetch(interaction.user.id);

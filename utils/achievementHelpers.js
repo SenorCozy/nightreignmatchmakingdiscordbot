@@ -1439,6 +1439,9 @@ const mvpCooldownAbuseAchievement = {
   goal_type: "mvp_cooldown_abuse",
 };
 
+logger.info("🎯 MVP Given Achievements:", mvpGivenAchievements);
+logger.info("🎯 MVP Received Achievements:", mvpReceivedAchievements);
+
 // 🟢 Match Completion Points
 const matchCompletionPointAchievements = [
   matchCompletionPointAchievement({
@@ -2125,73 +2128,6 @@ async function checkMatchCompletionPointAchievements(playerId, db) {
     console.error("❌ Failed to check match completion achievements:", err);
   }
 }
-
-async function checkMvpGivenAchievements(playerId, db) {
-  try {
-    const row = await db.getAsync(
-      `SELECT COUNT(*) as count FROM mvp_awards WHERE giver_id = ?`,
-      [playerId]
-    );
-
-    const givenCount = row?.count || 0;
-    await unlockThresholdAchievementsFromValue(
-      playerId,
-      givenCount,
-      mvpGivenAchievements
-    );
-    logger.info(
-      `Checking MVP achievements for ${playerId}, count: ${givenCount}`
-    );
-  } catch (err) {
-    logger.error("❌ Failed to check/unlock MVP given achievements", {
-      playerId,
-      error: err,
-    });
-  }
-}
-
-async function checkMvpReceivedAchievements(playerId, db) {
-  try {
-    const row = await db.getAsync(
-      `SELECT COUNT(*) as count FROM mvp_awards WHERE receiver_id = ?`,
-      [playerId]
-    );
-
-    const receivedCount = row?.count || 0;
-    await unlockThresholdAchievementsFromValue(
-      playerId,
-      receivedCount,
-      mvpReceivedAchievements
-    );
-    logger.info(
-      `Checking MVP achievements for ${playerId}, count: ${receivedCount}`
-    );
-  } catch (err) {
-    logger.error("❌ Failed to check/unlock MVP received achievements", {
-      playerId,
-      error: err,
-    });
-  }
-}
-
-async function unlockRepeatPartnerAchievements(playerId, repeatCount) {
-  const unlockable = repeatPartnerAchievements.filter(
-    (a) => repeatCount >= a.threshold
-  );
-
-  for (const achievement of unlockable) {
-    try {
-      await unlockAchievementIfNotEarned(playerId, achievement.id);
-    } catch (err) {
-      logger.warn("⚠️ Failed to unlock repeat partner achievement", {
-        playerId,
-        achievementId: achievement.id,
-        error: err.message,
-      });
-    }
-  }
-}
-
 async function unlockThresholdAchievementsFromValue(
   playerId,
   value,
@@ -2271,6 +2207,72 @@ async function checkSelflessMvpAchievement(playerId, db) {
 
   if (givenAfter?.count >= 10) {
     await unlockAchievementIfNotEarned(playerId, "selfless_mvp");
+  }
+}
+
+async function checkMvpGivenAchievements(playerId, db) {
+  try {
+    const row = await db.getAsync(
+      `SELECT COUNT(*) as count FROM mvp_awards WHERE giver_id = ?`,
+      [playerId]
+    );
+
+    const givenCount = row?.count || 0;
+    await unlockThresholdAchievementsFromValue(
+      playerId,
+      givenCount,
+      mvpGivenAchievements
+    );
+    logger.info(
+      `Checking MVP achievements for ${playerId}, count: ${givenCount}`
+    );
+  } catch (err) {
+    logger.error("❌ Failed to check/unlock MVP given achievements", {
+      playerId,
+      error: err,
+    });
+  }
+}
+
+async function checkMvpReceivedAchievements(playerId, db) {
+  try {
+    const row = await db.getAsync(
+      `SELECT COUNT(*) as count FROM mvp_awards WHERE receiver_id = ?`,
+      [playerId]
+    );
+
+    const receivedCount = row?.count || 0;
+    await unlockThresholdAchievementsFromValue(
+      playerId,
+      receivedCount,
+      mvpReceivedAchievements
+    );
+    logger.info(
+      `Checking MVP achievements for ${playerId}, count: ${receivedCount}`
+    );
+  } catch (err) {
+    logger.error("❌ Failed to check/unlock MVP received achievements", {
+      playerId,
+      error: err,
+    });
+  }
+}
+
+async function unlockRepeatPartnerAchievements(playerId, repeatCount) {
+  const unlockable = repeatPartnerAchievements.filter(
+    (a) => repeatCount >= a.threshold
+  );
+
+  for (const achievement of unlockable) {
+    try {
+      await unlockAchievementIfNotEarned(playerId, achievement.id);
+    } catch (err) {
+      logger.warn("⚠️ Failed to unlock repeat partner achievement", {
+        playerId,
+        achievementId: achievement.id,
+        error: err.message,
+      });
+    }
   }
 }
 

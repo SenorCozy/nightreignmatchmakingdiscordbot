@@ -58,27 +58,30 @@ async function hasGivenTooManyToday(giverId) {
       `SELECT COUNT(*) as count FROM mvp_awards WHERE giver_id = ? AND awarded_at > ?`,
       [giverId, Date.now() - 24 * 60 * 60 * 1000]
     );
-    return row?.count >= 5;
+    return row?.count >= 20;
   } catch (err) {
     logger.errorWrapper("MVP_Check_GiverLimit", err, { giverId });
     return true;
   }
 }
 
-// ✅ 4. Cooldown: can't MVP same user within 25 minutes
-async function hasCooldownActive(giverId, receiverId) {
+// ✅ 4. Cooldown: can't MVP same user within 2 hours
+async function hasCooldownActive(giverId, receiverId, matchId) {
   try {
     const row = await db.getAsync(
-      `SELECT awarded_at FROM mvp_awards WHERE giver_id = ? AND receiver_id = ? ORDER BY awarded_at DESC LIMIT 1`,
-      [giverId, receiverId]
+      `SELECT awarded_at FROM mvp_awards
+         WHERE giver_id = ? AND receiver_id = ? AND match_id = ?
+         ORDER BY awarded_at DESC LIMIT 1`,
+      [giverId, receiverId, matchId]
     );
     if (!row?.awarded_at) return false;
-    const twentyFiveMinutes = 25 * 60 * 1000;
-    return Date.now() - row.awarded_at < twentyFiveMinutes;
+    const cooldown = 30 * 60 * 1000;
+    return Date.now() - row.awarded_at < cooldown;
   } catch (err) {
     logger.errorWrapper("MVP_Check_Cooldown", err, {
       giverId,
       receiverId,
+      matchId,
     });
     return true;
   }
@@ -94,6 +97,24 @@ async function hasReceivedTooManyToday(receiverId) {
     return row?.count >= 10;
   } catch (err) {
     logger.errorWrapper("MVP_Check_ReceiverLimit", err, { receiverId });
+    return true;
+  }
+}
+// 6. per match limit
+async function hasExceededPerMatchLimit(giverId, receiverId, matchId) {
+  try {
+    const row = await db.getAsync(
+      `SELECT COUNT(*) as count FROM mvp_awards
+         WHERE giver_id = ? AND receiver_id = ? AND match_id = ?`,
+      [giverId, receiverId, matchId]
+    );
+    return row?.count >= 3;
+  } catch (err) {
+    logger.errorWrapper("MVP_Check_PerMatchLimit", err, {
+      giverId,
+      receiverId,
+      matchId,
+    });
     return true;
   }
 }
@@ -192,4 +213,5 @@ module.exports = {
   hasCooldownActive,
   hasReceivedTooManyToday,
   applyMvpAward,
+  hasExceededPerMatchLimit,
 };
