@@ -104,7 +104,7 @@ module.exports = {
 
           statusMessage += `\n`;
         } else {
-          statusMessage += `🔹 **Queue Status:** Not in queue\n\n`;
+          statusMessage += `🔹 **Queue Status:** Not in queue\n`;
         }
 
         try {
@@ -181,7 +181,7 @@ module.exports = {
 
         try {
           const match = await db.getAsync(
-            `SELECT match_id FROM matches WHERE thread_id = ?`,
+            `SELECT match_id, shared_nightlords, vc_match FROM matches WHERE thread_id = ?`,
             [thread.id]
           );
 
@@ -202,6 +202,17 @@ module.exports = {
             [match.match_id]
           );
 
+          const NIGHTLORD_LABELS = {
+            tricephalos: "Tricephalos",
+            gaping_jaw: "Gaping Jaw",
+            sentient_pest: "Sentient Pest",
+            augur: "Augur",
+            equilibrious_beast: "Equilibrious Beast",
+            darkdrift_knight: "Darkdrift Knight",
+            fissure: "Fissure in the Fog",
+            night_aspect: "Night Aspect",
+          };
+
           let statusMessage = `**🧾 Match Status for <#${thread.id}>:**\n`;
           statusMessage += `🔹 **Active Players (${active.length}):** ${
             active.map((r) => `<@${r.playerId}>`).join(", ") || "None"
@@ -214,6 +225,30 @@ module.exports = {
             }
           } else {
             statusMessage += `🔸 **Removed Players:** None\n`;
+          }
+
+          // 🎧 VC Preference Reporting
+          if (match.vc_match === 1) {
+            statusMessage += `🔊 **Voice Chat Preference Respected:** Yes ✅\n`;
+          } else if (match.vc_match === 0) {
+            statusMessage += `🔊 **Voice Chat Preference Respected:** No ❌\n`;
+          } else {
+            statusMessage += `🔊 **Voice Chat Preference Respected:** Not specified\n`;
+          }
+
+          // 👹 Shared Nightlord Selections
+          const nightlords = match.shared_nightlords
+            ? match.shared_nightlords
+                .split(",")
+                .map((n) => NIGHTLORD_LABELS[n] || n)
+            : [];
+
+          if (nightlords.length) {
+            statusMessage += `👹 **Common Nightlords:** ${nightlords.join(
+              ", "
+            )}\n`;
+          } else {
+            statusMessage += `👹 **Common Nightlords:** Not recorded\n`;
           }
 
           return interaction.reply({ content: statusMessage, flags: 64 });

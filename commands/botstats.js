@@ -9,6 +9,17 @@ const {
 const db = require("../database");
 const logger = require("../logger");
 
+const NIGHTLORD_LABELS = {
+  tricephalos: "Tricephalos",
+  gaping_jaw: "Gaping Jaw",
+  sentient_pest: "Sentient Pest",
+  augur: "Augur",
+  equilibrious_beast: "Equilibrious Beast",
+  darkdrift_knight: "Darkdrift Knight",
+  fissure: "Fissure in the Fog",
+  night_aspect: "Night Aspect",
+};
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("botstats")
@@ -92,6 +103,7 @@ module.exports = {
             )
             .join("\n")
         : "No top players found.";
+
       const topMvpRecipients = await fetchTopMvpRecipients(10);
       const mvpBlock = topMvpRecipients.length
         ? topMvpRecipients
@@ -99,16 +111,39 @@ module.exports = {
             .join("\n")
         : "No MVP data available.";
 
+      const vcBlock = `**🎧 VC Preference Stats**
+- VC Respected: ${statMap.vc_respected || 0}
+- VC Not Respected: ${statMap.vc_not_respected || 0}
+- VC Pref Yes: ${statMap.vc_pref_yes || 0}
+- VC Pref No: ${statMap.vc_pref_no || 0}`;
+
+      const nightlordStats = Object.entries(statMap)
+        .filter(([key]) => key.startsWith("nl_"))
+        .map(([key, value]) => {
+          const bossKey = key.replace("nl_", "");
+          const label = NIGHTLORD_LABELS[bossKey] || bossKey;
+          return `- ${label}: ${value}`;
+        });
+
+      const nightlordBlock = nightlordStats.length
+        ? `**👹 Nightlord Selections**\n${nightlordStats.join("\n")}`
+        : "**👹 Nightlord Selections**\nNo data recorded yet.";
+
       const content = `
 **📊 Bot Statistics**
 - **Unique Users:** ${statMap.unique_users || 0}
-- **Total Queue Entries:** ${statMap.total_queue_entries || 0}
+- - **Total Queue Entries:** ${statMap.total_queue_entries || 0}
   - Solo: ${statMap.queue_entries_solo || 0}
   - Duo: ${statMap.queue_entries_duo || 0}
+  - Trio: ${statMap.queue_entries_trio || 0}
 - **Total Matches Created:** ${statMap.total_matches_created || 0}
 - **Failed Ready Checks:** ${failedReadyChecks}
 - **Average Match Length (Global):** ${globalAvgMatchLength} seconds
 - **Longest Match Duration (Global):** ${longestMatchSeconds} seconds
+
+${vcBlock}
+
+${nightlordBlock}
 
 **📈 Per-Platform Stats**
 ${platformStatsBlock.join("\n")}

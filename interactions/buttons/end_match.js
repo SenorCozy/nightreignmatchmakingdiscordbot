@@ -31,10 +31,22 @@ module.exports = {
     }
 
     try {
-      const { voiceChannelId } = await db.getAsync(
+      const channelRow = await db.getAsync(
         `SELECT voiceChannelId FROM channels WHERE threadId = ?`,
         [thread.id]
       );
+
+      if (!channelRow) {
+        logger.warn("⚠️ No channel found for thread during end_match button", {
+          threadId: thread.id,
+        });
+        return interaction.reply({
+          content: "❌ This match thread is not properly registered.",
+          flags: 64,
+        });
+      }
+
+      const { voiceChannelId } = channelRow;
 
       const activePlayers = await db
         .allAsync(
@@ -42,13 +54,6 @@ module.exports = {
           [thread.id]
         )
         .then((rows) => rows.map((r) => r.playerId));
-
-      if (!activePlayers.includes(userId)) {
-        return interaction.reply({
-          content: "❌ You are not an active player in this match.",
-          flags: 64,
-        });
-      }
 
       if (hasModRole(interaction.member)) {
         await interaction.deferUpdate();
@@ -65,6 +70,30 @@ module.exports = {
           voiceChannelId,
           closedByUserOrBot: interaction.user,
           closureReason: "Ended by moderator via button",
+        });
+        activeMatchEndVotes.delete(thread.id);
+        matchEndCollectors.delete(thread.id);
+        return;
+      }
+
+      if (!activePlayers.includes(userId)) {
+        return interaction.reply({
+          content: "❌ You are not an active player in this match.",
+          flags: 64,
+        });
+      }
+
+      if (activePlayers.length === 1 && activePlayers[0] === userId) {
+        await interaction.deferUpdate();
+        await safeSend(
+          thread,
+          "☑️ Only one player remains. Ending the match..."
+        );
+        await cleanupMatch({
+          thread,
+          voiceChannelId,
+          closedByUserOrBot: interaction.user,
+          closureReason: "Match ended automatically (only one player remained)",
         });
         activeMatchEndVotes.delete(thread.id);
         matchEndCollectors.delete(thread.id);

@@ -9,6 +9,36 @@ const commandHandlers = new Map();
 const modalHandlers = new Map();
 const regexModalHandlers = [];
 
+const selectMenuHandlers = new Map();
+const regexSelectHandlers = [];
+
+// Load string select menu handlers (e.g. "select_nightlords")
+const selectPath = path.join(__dirname, "selects");
+if (fs.existsSync(selectPath)) {
+  const selectFiles = fs
+    .readdirSync(selectPath)
+    .filter((file) => file.endsWith(".js"));
+
+  for (const file of selectFiles) {
+    const handler = require(path.join(selectPath, file));
+    if (handler?.customId && typeof handler.execute === "function") {
+      selectMenuHandlers.set(handler.customId, handler.execute);
+      logger.info(`🎯 Registered select menu: ${handler.customId}`);
+    } else if (
+      handler?.customIdRegex &&
+      typeof handler.execute === "function"
+    ) {
+      regexSelectHandlers.push({
+        ...handler,
+        regex: handler.customIdRegex,
+      });
+      logger.info(
+        `🎯 Registered regex select handler: ${handler.customIdRegex}`
+      );
+    }
+  }
+}
+
 // Load modal handlers
 const modalPath = path.join(__dirname, "modals");
 if (fs.existsSync(modalPath)) {
@@ -125,6 +155,25 @@ module.exports = async (interaction) => {
       }
 
       logger.warn("⚠️ No modal handler found", {
+        customId: interaction.customId,
+      });
+    } else if (interaction.isStringSelectMenu()) {
+      const exact = selectMenuHandlers.get(interaction.customId);
+      if (exact) {
+        return await exact(interaction);
+      }
+
+      const matched = regexSelectHandlers.find((s) =>
+        s.regex.test(interaction.customId)
+      );
+      if (matched) {
+        logger.info("🎯 Routed to regex select handler", {
+          customId: interaction.customId,
+        });
+        return await matched.execute(interaction);
+      }
+
+      logger.warn("⚠️ No select menu handler found", {
         customId: interaction.customId,
       });
     }

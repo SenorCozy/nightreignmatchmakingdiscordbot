@@ -227,12 +227,15 @@ function dailyMatchStreakAchievement({ id, name, description, reward, days }) {
     check: async (playerId, db) => {
       const results = await db.allAsync(
         `SELECT DISTINCT DATE(timestamp / 1000.0, 'unixepoch', 'localtime') AS play_date
-                 FROM match_completion_awards
-                 WHERE player_id = ?
-                 ORDER BY play_date DESC
-                 LIMIT ?`,
+     FROM match_completion_awards
+     WHERE player_id = ?
+     AND timestamp IS NOT NULL
+     ORDER BY play_date DESC
+     LIMIT ?`,
         [playerId, days]
       );
+
+      if (!results?.length) return false;
 
       const today = new Date();
       for (let i = 0; i < days; i++) {
@@ -240,7 +243,7 @@ function dailyMatchStreakAchievement({ id, name, description, reward, days }) {
         checkDate.setDate(today.getDate() - i);
         const iso = checkDate.toISOString().slice(0, 10);
 
-        if (!results.some((r) => r.play_date === iso)) {
+        if (!results.some((r) => r?.play_date === iso)) {
           return false;
         }
       }
@@ -1590,11 +1593,11 @@ const storePurchaseAchievements = [
     threshold: 5,
   }),
   storeCompleteAchievement({
-    id: "store_all",
+    id: "store_buy_8",
     name: "Shopping Spree",
-    description: "Buy everything from the store",
+    description: "Buy 8 things from the store",
     reward: 25,
-    threshold: 9,
+    threshold: 8,
   }),
 ];
 
@@ -1957,10 +1960,17 @@ async function unlockAchievementIfNotEarned(playerId, achievementId) {
     `🏆 Achievement unlocked: ${achievementId} for ${playerId} (Reward: ${achievement.reward})`
   );
 
-  await db.runAsync(
-    `INSERT INTO player_achievements (player_id, achievement_id, unlocked_at) VALUES (?, ?, ?)`,
+  const insertResult = await db.runAsync(
+    `INSERT OR IGNORE INTO player_achievements (player_id, achievement_id, unlocked_at) VALUES (?, ?, ?)`,
     [playerId, achievementId, Date.now()]
   );
+
+  if (insertResult.changes === 0) {
+    logger.debug(
+      `🛑 Duplicate achievement prevented via OR IGNORE: ${achievementId} for ${playerId}`
+    );
+    return false;
+  }
 
   // 💰 Apply reward if applicable
   if (achievement.reward > 0) {
@@ -2013,7 +2023,7 @@ async function unlockAchievementIfNotEarned(playerId, achievementId) {
       });
     }
   } catch (err) {
-    console.warn("⚠️ Failed to send achievement alert:", err);
+    logger.warn("⚠️ Failed to send achievement alert:", err);
   }
 
   return true;
@@ -2078,13 +2088,23 @@ async function unlockMatchDurationAchievementThreshold(
 async function checkDailyMatchStreakAchievements(playerId) {
   try {
     for (const achievement of dailyMatchStreakAchievements) {
-      const passed = await achievement.check(playerId, db);
-      if (passed) {
-        await unlockAchievementIfNotEarned(playerId, achievement.id);
+      try {
+        const passed = await achievement.check(playerId, db);
+        if (passed) {
+          await unlockAchievementIfNotEarned(playerId, achievement.id);
+        }
+      } catch (err) {
+        logger.warn(
+          `⚠️ Failed to evaluate streak achievement: ${achievement.id}`,
+          {
+            playerId,
+            error: err.message,
+          }
+        );
       }
     }
   } catch (err) {
-    logger.warn("⚠️ Failed to check daily match streak achievements", {
+    logger.error("❌ Unhandled error in streak achievement loop", {
       playerId,
       error: err.message,
     });
@@ -2106,7 +2126,7 @@ async function checkCurrencyAchievements(playerId, db) {
       }
     }
   } catch (err) {
-    console.error("❌ Failed to check currency achievements:", err);
+    logger.error("❌ Failed to check currency achievements:", err);
   }
 }
 
@@ -2125,21 +2145,34 @@ async function checkMatchCompletionPointAchievements(playerId, db) {
       }
     }
   } catch (err) {
-    console.error("❌ Failed to check match completion achievements:", err);
+    logger.error("❌ Failed to check match completion achievements:", err);
   }
 }
+
 async function unlockThresholdAchievementsFromValue(
   playerId,
   value,
   achievements
 ) {
-  const unlocks = achievements.filter((a) => value >= a.threshold);
+  if (!Array.isArray(achievements) || achievements.length === 0) {
+    logger.warn(`⚠️ No achievements provided to unlock for player ${playerId}`);
+    return;
+  }
+
   if (value <= 0) return;
+
+  const unlocks = achievements.filter((a) => value >= a.threshold);
+  if (unlocks.length === 0) {
+    logger.debug(
+      `📭 No new achievements unlocked for ${playerId} at value ${value}`
+    );
+  }
 
   for (const a of unlocks) {
     await unlockAchievementIfNotEarned(playerId, a.id);
   }
 }
+
 async function checkDualMvp(receiverId, matchId, db) {
   const rows = await db.allAsync(
     `SELECT giver_id FROM mvp_awards WHERE receiver_id = ? AND match_id = ?`,
@@ -2218,11 +2251,19 @@ async function checkMvpGivenAchievements(playerId, db) {
     );
 
     const givenCount = row?.count || 0;
+    logger.debug("🚦 Triggering unlockThresholdAchievementsFromValue (given)", {
+      playerId,
+      value: givenCount,
+      achievementsCount: mvpGivenAchievements.length,
+      firstAchievementId: mvpGivenAchievements[0]?.id,
+    });
+
     await unlockThresholdAchievementsFromValue(
       playerId,
       givenCount,
       mvpGivenAchievements
     );
+
     logger.info(
       `Checking MVP achievements for ${playerId}, count: ${givenCount}`
     );
@@ -2242,11 +2283,22 @@ async function checkMvpReceivedAchievements(playerId, db) {
     );
 
     const receivedCount = row?.count || 0;
+    logger.debug(
+      "🚦 Triggering unlockThresholdAchievementsFromValue (received)",
+      {
+        playerId,
+        value: receivedCount,
+        achievementsCount: mvpReceivedAchievements.length,
+        firstAchievementId: mvpReceivedAchievements[0]?.id,
+      }
+    );
+
     await unlockThresholdAchievementsFromValue(
       playerId,
       receivedCount,
       mvpReceivedAchievements
     );
+
     logger.info(
       `Checking MVP achievements for ${playerId}, count: ${receivedCount}`
     );

@@ -18,20 +18,17 @@ module.exports = {
         });
       });
 
-      // 🔍 Fetch match data
-      const { match_id, voiceChannelId } = await new Promise(
-        (resolve, reject) => {
-          db.get(
-            `SELECT match_id, voiceChannelId FROM channels WHERE threadId = ?`,
-            [threadId],
-            (err, row) => (err ? reject(err) : resolve(row || {}))
-          );
-        }
-      );
+      const { match_id, voiceChannelId } =
+        (await db.getAsync(
+          `SELECT match_id, voiceChannelId FROM channels WHERE threadId = ?`,
+          [threadId]
+        )) || {};
 
       if (!match_id) {
         return interaction
-          .editReply({ content: "❌ No match found for this thread." })
+          .editReply({
+            content: "❌ No match found for this thread.",
+          })
           .catch(() => {});
       }
 
@@ -43,23 +40,21 @@ module.exports = {
           .catch(() => {});
       }
 
-      // 🔍 Get active players
-      const activePlayers = await new Promise((resolve, reject) => {
-        db.all(
+      const activePlayers = await db
+        .allAsync(
           `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
-          [match_id],
-          (err, rows) =>
-            err ? reject(err) : resolve(rows.map((r) => r.playerId))
-        );
-      });
+          [match_id]
+        )
+        .then((rows) => rows.map((r) => r.playerId));
 
       if (!activePlayers.length) {
         return interaction
-          .editReply({ content: "❌ No active players found for this match." })
+          .editReply({
+            content: "❌ No active players found for this match.",
+          })
           .catch(() => {});
       }
 
-      // 🔍 Validate parent categories
       const parentChannel = thread?.parent;
       const parentCategory = parentChannel?.parent;
 
@@ -72,7 +67,6 @@ module.exports = {
           .catch(() => {});
       }
 
-      // 🔍 Server channel limit check
       const fetchedChannels = await interaction.guild.channels.fetch();
       if (fetchedChannels.size >= 500) {
         return interaction
@@ -83,7 +77,6 @@ module.exports = {
           .catch(() => {});
       }
 
-      // 🔐 Permissions
       const moderatorRoleIds = [
         process.env.TICKET_HANDLER_ROLE,
         process.env.ELDEN_MODERATOR_ROLE,
@@ -91,10 +84,40 @@ module.exports = {
         process.env.BOT_ROLE,
       ].filter(Boolean);
 
+      function sanitizeUsername(name) {
+        let safe = name.toLowerCase().replace(/[^a-z0-9._]/g, "");
+        while (safe.includes("..")) {
+          safe = safe.replace(/\.\.+/g, ".");
+        }
+        return safe.slice(0, 32);
+      }
+
+      function buildChannelName(prefix, usernames, maxLength = 100) {
+        const base = `${prefix}-${usernames.join("-")}`;
+        return base.length <= maxLength
+          ? base
+          : `${prefix}-${usernames.slice(0, 3).join("-")}-etc`;
+      }
+
+      const usernames = await Promise.all(
+        activePlayers.map(async (id) => {
+          try {
+            const user = await interaction.client.users.fetch(id);
+            return sanitizeUsername(user.username);
+          } catch {
+            return "unknown";
+          }
+        })
+      );
+
+      const vcName = usernames.length
+        ? buildChannelName("match-voice", usernames)
+        : `match-voice-${match_id.slice(0, 8)}`;
+
       let voiceChannel;
       try {
         voiceChannel = await interaction.guild.channels.create({
-          name: `match-voice-${activePlayers.join("-")}`,
+          name: vcName,
           type: ChannelType.GuildVoice,
           parent: parentCategory.id,
           permissionOverwrites: [
@@ -143,26 +166,13 @@ module.exports = {
         name: voiceChannel.name,
       });
 
-      // 💾 Save to DB
-      db.run(
+      await db.runAsync(
         `UPDATE channels SET voiceChannelId = ? WHERE threadId = ?`,
-        [voiceChannel.id, threadId],
-        (err) => {
-          if (err) {
-            logger.errorWrapper(
-              "❌ Failed to store voiceChannelId in DB",
-              err,
-              { match_id, threadId }
-            );
-          } else {
-            logger.info("📦 Stored voiceChannelId in DB", {
-              voiceChannelId: voiceChannel.id,
-            });
-          }
-        }
+        [voiceChannel.id, threadId]
       );
+
       await safeSend(thread, {
-        content: `🎤 A private voice channel has been created for this match!\n👉 [Click to Join](https://discord.com/channels/${guildId}/${voiceChannel.id})`,
+        content: `🎤 A private voice channel has been created!\n👉 [Join Now](https://discord.com/channels/${guildId}/${voiceChannel.id})`,
       });
 
       await interaction
@@ -170,11 +180,11 @@ module.exports = {
           content: "✅ Voice Channel has been created.",
           flags: 64,
         })
-        .catch((err) => {
+        .catch((err) =>
           logger.warn("⚠️ Failed to follow up after VC creation", {
             error: err.message,
-          });
-        });
+          })
+        );
     } catch (error) {
       logger.errorWrapper("❌ Uncaught error in create_voice_channel", error, {
         threadId,

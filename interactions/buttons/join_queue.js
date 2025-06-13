@@ -5,12 +5,35 @@ const {
 const { getPlayerById } = require("../../utils/playerUtils");
 const db = require("../../database");
 const logger = require("../../logger");
+const REQUIRED_ROLE_ID = process.env.NIGHTREIGN_ROLE; // Add this
 
 module.exports = {
   customId: "join_queue",
 
   async execute(interaction) {
     const playerId = interaction.user.id;
+    const member = await interaction.guild.members.fetch(playerId);
+
+    if (!member.roles.cache.has(REQUIRED_ROLE_ID)) {
+      try {
+        await member.roles.add(REQUIRED_ROLE_ID);
+        logger.info("🔐 Assigned required role for queue access", {
+          playerId,
+          roleId: REQUIRED_ROLE_ID,
+        });
+      } catch (err) {
+        logger.errorWrapper("❌ Failed to assign required queue role", err, {
+          playerId,
+          roleId: REQUIRED_ROLE_ID,
+        });
+
+        return interaction.reply({
+          content:
+            "❌ I couldn’t assign you the required role to join matchmaking. Please manually obtain this role from #role-assignment channel and try again.",
+          flags: 64,
+        });
+      }
+    }
 
     try {
       // ✅ Check if queue is locked

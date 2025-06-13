@@ -14,13 +14,13 @@ module.exports = async (addedMembers, removedMembers, thread) => {
     for (const [playerId] of removedMembers) {
       try {
         const match = await db.getAsync(
-          `SELECT match_id, voiceChannelId FROM channels WHERE threadId = ?`,
+          `SELECT match_id, voiceChannelId, shared_nightlords FROM matches WHERE thread_id = ?`,
           [thread.id]
         );
 
         if (!match?.match_id) continue;
 
-        const { match_id, voiceChannelId } = match;
+        const { match_id, voiceChannelId, shared_nightlords } = match;
 
         const playerStatus = await db.getAsync(
           `SELECT status, leave_in_progress FROM match_players WHERE match_id = ? AND playerId = ?`,
@@ -60,21 +60,46 @@ module.exports = async (addedMembers, removedMembers, thread) => {
           });
           await cleanupMatch({ thread, voiceChannelId });
         } else {
+          let formattedPrefs = "_None currently set._";
+          try {
+            const parsed = shared_nightlords
+              ? JSON.parse(shared_nightlords)
+              : [];
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              formattedPrefs = parsed.map((boss) => `• ${boss}`).join("\n");
+            }
+          } catch (err) {
+            logger.warn(
+              "⚠️ Failed to parse shared_nightlords in threadMemberUpdate",
+              {
+                match_id,
+                error: err.message,
+              }
+            );
+          }
+
           const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
-              .setCustomId("end_match_now")
-              .setLabel("End Match Immediately")
-              .setStyle(ButtonStyle.Danger),
+              .setCustomId("update_shared_nightlords_button")
+              .setLabel("Update Nightlord Preferences")
+              .setStyle(ButtonStyle.Secondary),
             new ButtonBuilder()
               .setCustomId("find_replacement")
               .setLabel("Find Replacement from Queue")
-              .setStyle(ButtonStyle.Primary)
+              .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+              .setCustomId("end_match_now")
+              .setLabel("End Match Immediately")
+              .setStyle(ButtonStyle.Danger)
           );
 
           await safeSend(thread, {
-            content: `⚠️ <@${remaining.join(
-              ">, <@"
-            )}>: A player has left the match.\nWould you like to end the match or search for a replacement?`,
+            content: `⚠️ <@${remaining.join(">, <@")}>
+A player has left the match.
+
+**Current Nightlord Preferences:**\n${formattedPrefs}
+
+Would you like to update preferences before searching for a replacement or ending the match?`,
             components: [row],
           });
         }

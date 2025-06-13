@@ -18,10 +18,11 @@ module.exports = {
       );
 
       if (!isMod) {
-        return interaction.reply({
+        await interaction.reply({
           content: "🚫 You must be a moderator to review submissions.",
           flags: 64,
         });
+        return;
       }
 
       const submissionId = interaction.customId.split("_").pop();
@@ -39,17 +40,19 @@ module.exports = {
           submissionId,
           reviewerId,
         });
-        return interaction.reply({
+        await interaction.reply({
           content: "❌ Failed to retrieve submission. Please try again.",
           flags: 64,
         });
+        return;
       }
 
       if (!submission || submission.status !== "pending") {
-        return interaction.reply({
+        await interaction.reply({
           content: "❌ Submission already reviewed or invalid.",
           flags: 64,
         });
+        return;
       }
 
       try {
@@ -64,10 +67,11 @@ module.exports = {
           submissionId,
           reviewerId,
         });
-        return interaction.reply({
+        await interaction.reply({
           content: "❌ Failed to update submission status.",
           flags: 64,
         });
+        return;
       }
 
       let participants = [];
@@ -128,10 +132,22 @@ module.exports = {
         userId: interaction.user?.id,
         customId: interaction.customId,
       });
-      return interaction.reply({
-        content: "❌ An unexpected error occurred.",
-        flags: 64,
-      });
+
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction
+          .reply({
+            content: "❌ An unexpected error occurred.",
+            flags: 64,
+          })
+          .catch(() => {});
+      } else {
+        await interaction
+          .followUp({
+            content: "❌ An unexpected error occurred.",
+            flags: 64,
+          })
+          .catch(() => {});
+      }
     }
   },
 };

@@ -44,16 +44,23 @@ module.exports = {
         )
         .addIntegerOption((opt) =>
           opt
-            .setName("reward")
-            .setDescription("Currency reward upon completion")
-            .setRequired(true)
-        )
-        .addIntegerOption((opt) =>
-          opt
             .setName("duration_days")
             .setDescription("How many days the event should run")
             .setRequired(true)
         )
+        .addIntegerOption((opt) =>
+          opt
+            .setName("currency_reward")
+            .setDescription("💰 Currency reward upon completion")
+            .setRequired(false)
+        )
+        .addIntegerOption((opt) =>
+          opt
+            .setName("match_point_reward")
+            .setDescription("🏅 Match points reward upon completion")
+            .setRequired(false)
+        )
+
         // ✅ Optional options come after required ones
 
         .addStringOption((opt) =>
@@ -86,9 +93,15 @@ module.exports = {
         )
         .addIntegerOption((opt) =>
           opt
-            .setName("reward")
-            .setDescription("Reward for this tier")
-            .setRequired(true)
+            .setName("currency_reward")
+            .setDescription("💰 Currency reward for this tier")
+            .setRequired(false)
+        )
+        .addIntegerOption((opt) =>
+          opt
+            .setName("match_point_reward")
+            .setDescription("🏅 Match points reward for this tier")
+            .setRequired(false)
         )
     )
     .addSubcommand((sub) =>
@@ -115,19 +128,39 @@ module.exports = {
             .setDescription("Event ID to delete")
             .setRequired(true)
         )
-    )
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    ),
 
   async execute(interaction) {
     const subcommand = interaction.options.getSubcommand();
     const now = Date.now();
+
+    const MODERATOR_ROLE_IDS = [
+      process.env.ELDEN_MODERATOR_ROLE,
+      process.env.ELDEN_ENFORCER_ROLE,
+      process.env.ELDER_TICKET_HANDLER_ROLE,
+    ];
+
+    const member = await interaction.guild.members.fetch(interaction.user.id);
+    const isMod = member.roles.cache.some((role) =>
+      MODERATOR_ROLE_IDS.includes(role.id)
+    );
+
+    if (!isMod) {
+      return interaction.reply({
+        content: "🚫 You must be a moderator to use this command.",
+        flags: 64,
+      });
+    }
 
     try {
       if (subcommand === "event") {
         const name = interaction.options.getString("name");
         const goalType = interaction.options.getString("goal_type");
         const goalTarget = interaction.options.getInteger("goal_target");
-        const reward = interaction.options.getInteger("reward");
+        const currencyReward =
+          interaction.options.getInteger("currency_reward") || 0;
+        const matchPointReward =
+          interaction.options.getInteger("match_point_reward") || 0;
         const durationDays = interaction.options.getInteger("duration_days");
         const description = interaction.options.getString("description") || "";
         const cooldownMinutes =
@@ -158,9 +191,9 @@ module.exports = {
 
         await db.runAsync(
           `INSERT INTO events (
-              event_id, name, description, goal_type, start_time, end_time,
-              reward, goal_target, cooldown_ms, event_type
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    event_id, name, description, goal_type, start_time, end_time,
+    currency_reward, match_point_reward, goal_target, cooldown_ms, event_type, active
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             eventId,
             name,
@@ -168,10 +201,12 @@ module.exports = {
             goalType,
             start,
             end,
-            reward,
+            currencyReward,
+            matchPointReward,
             goalTarget,
             cooldownMs,
             eventType,
+            1,
           ]
         );
 
@@ -189,18 +224,37 @@ module.exports = {
         const eventId = interaction.options.getString("event_id");
         const tierIndex = interaction.options.getInteger("tier_index");
         const goalTarget = interaction.options.getInteger("goal_target");
-        const reward = interaction.options.getInteger("reward");
-
+        const currencyReward =
+          interaction.options.getInteger("currency_reward") || 0;
+        const matchPointReward =
+          interaction.options.getInteger("match_point_reward") || 0;
         const tierId = `${eventId}-${tierIndex}`;
 
         await db.runAsync(
-          `INSERT INTO event_tiers (tier_id, event_id, tier_index, goal_target, reward)
-             VALUES (?, ?, ?, ?, ?)`,
-          [tierId, eventId, tierIndex, goalTarget, reward]
+          `INSERT INTO event_tiers (
+    tier_id, event_id, tier_index, goal_target,
+    currency_reward, match_point_reward
+  ) VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            tierId,
+            eventId,
+            tierIndex,
+            goalTarget,
+            currencyReward,
+            matchPointReward,
+          ]
         );
 
+        const rewardDisplay =
+          [
+            currencyReward ? `💰 ${currencyReward}` : "",
+            matchPointReward ? `🏅 ${matchPointReward}` : "",
+          ]
+            .filter(Boolean)
+            .join(" + ") || "None";
+
         return interaction.reply({
-          content: `🎯 Tier ${tierIndex} added to event \`${eventId}\` (Target: ${goalTarget}, Reward: ${reward}).`,
+          content: `🎯 Tier ${tierIndex} added to event \`${eventId}\` (Target: ${goalTarget}, Reward: ${rewardDisplay}).`,
           flags: 64,
         });
       }
@@ -223,7 +277,11 @@ module.exports = {
             name: `🆔 ${ev.event_id}`,
             value: `**${ev.name}**\nGoal: \`${ev.goal_type}\` → ${
               ev.goal_target
-            }\nReward: ${ev.reward}\nCooldown: ${
+            }\nRewards: ${
+              ev.currency_reward ? `💰 ${ev.currency_reward}` : ""
+            }${ev.currency_reward && ev.match_point_reward ? " + " : ""}${
+              ev.match_point_reward ? `🏅 ${ev.match_point_reward}` : ""
+            }\nCooldown: ${
               ev.cooldown_ms
                 ? `${Math.floor(ev.cooldown_ms / 60000)} min`
                 : "None"
@@ -237,24 +295,79 @@ module.exports = {
       }
 
       if (subcommand === "endevent") {
-        const eventId = interaction.options.getString("event_id");
-        await db.runAsync(`UPDATE events SET active = 0 WHERE event_id = ?`, [
-          eventId,
-        ]);
+        const input = interaction.options.getString("event_id");
+
+        // Look up by name OR ID
+        const found = await db.getAsync(
+          `SELECT event_id FROM events WHERE event_id = ? OR name = ?`,
+          [input, input]
+        );
+
+        if (!found) {
+          return interaction.reply({
+            content: `❌ No event found with ID or name \`${input}\`.`,
+            flags: 64,
+          });
+        }
+
+        logger.info(`🔚 Attempting to mark event as ended: ${found.event_id}`);
+
+        const result = await db.runAsync(
+          `UPDATE events SET active = 0 WHERE event_id = ?`,
+          [found.event_id]
+        );
+
+        logger.info(
+          `✅ Event ${found.event_id} marked as ended (rows updated: ${
+            result.changes ?? "unknown"
+          })`
+        );
+
         return interaction.reply({
-          content: `🛑 Event \`${eventId}\` marked as ended.`,
+          content: `🛑 Event \`${input}\` marked as ended.`,
           flags: 64,
         });
       }
 
       if (subcommand === "deleteevent") {
-        const eventId = interaction.options.getString("event_id");
-        await db.runAsync(`DELETE FROM events WHERE event_id = ?`, [eventId]);
-        await db.runAsync(`DELETE FROM event_progress WHERE event_id = ?`, [
-          eventId,
-        ]);
+        const input = interaction.options.getString("event_id");
+
+        const found = await db.getAsync(
+          `SELECT event_id FROM events WHERE event_id = ? OR name = ?`,
+          [input, input]
+        );
+
+        if (!found) {
+          return interaction.reply({
+            content: `❌ No event found with ID or name \`${input}\`.`,
+            flags: 64,
+          });
+        }
+
+        logger.info(`🗑️ Attempting to soft-delete event: ${found.event_id}`);
+
+        const updateResult = await db.runAsync(
+          `UPDATE events SET active = 0 WHERE event_id = ?`,
+          [found.event_id]
+        );
+        const deleteProgressResult = await db.runAsync(
+          `DELETE FROM event_progress WHERE event_id = ?`,
+          [found.event_id]
+        );
+
+        logger.info(
+          `🔄 Soft-deleted event ${found.event_id} (update result: ${
+            updateResult.changes ?? "unknown"
+          })`
+        );
+        logger.info(
+          `🧹 Cleared event_progress for event ${
+            found.event_id
+          } (deleted rows: ${deleteProgressResult.changes ?? "unknown"})`
+        );
+
         return interaction.reply({
-          content: `🗑️ Event \`${eventId}\` and related progress data deleted.`,
+          content: `🗑️ Event \`${input}\` marked as inactive and progress data deleted.`,
           flags: 64,
         });
       }

@@ -325,36 +325,30 @@ async function cleanupMatch({
 async function cleanupMatches(client) {
   logger.info("🧹 Running periodic cleanup...");
 
-  client.guilds.cache.forEach(async (guild) => {
-    const allThreads = guild.channels.cache.filter((channel) =>
-      channel.isThread()
-    );
+  for (const guild of client.guilds.cache.values()) {
+    try {
+      const activeMatchThreads = await db.allAsync(
+        `SELECT m.match_id, m.thread_id, c.voiceChannelId, c.lastActivity
+         FROM matches m
+         JOIN channels c ON m.thread_id = c.threadId
+         WHERE m.closed_at IS NULL`
+      );
 
-    for (const thread of allThreads.values()) {
-      try {
-        const dbResult = await new Promise((resolve, reject) => {
-          db.get(
-            `SELECT voiceChannelId, lastActivity FROM channels WHERE threadId = ?`,
-            [thread.id],
-            (err, row) => (err ? reject(err) : resolve(row))
-          );
-        });
+      for (const row of activeMatchThreads) {
+        const { thread_id, voiceChannelId, lastActivity } = row;
+        const thread = await guild.channels.fetch(thread_id).catch(() => null);
+        if (!thread?.isThread()) continue;
 
-        if (!dbResult) {
-          logger.warn("⚠️ No DB entry for thread", { threadName: thread.name });
-          continue;
-        }
-
-        const { voiceChannelId, lastActivity } = dbResult;
         const now = Date.now();
 
+        // Try to get the most recent message in the thread
         const lastMessage = await thread.messages
           .fetch({ limit: 1 })
           .then((msgs) => msgs.first())
           .catch(() => null);
 
         const lastMessageTimestamp =
-          lastMessage?.createdTimestamp || lastActivity;
+          lastMessage?.createdTimestamp || lastActivity || 0;
         const minutesInactive = (now - lastMessageTimestamp) / 60000;
 
         if (voiceChannelId) {
@@ -369,26 +363,32 @@ async function cleanupMatches(client) {
           }
         }
 
-        if (minutesInactive > 65) {
-          logger.info("🕒 Thread inactive — initiating cleanup", {
+        if (minutesInactive > 90) {
+          logger.info("🕒 Match thread inactive — initiating cleanup", {
             threadName: thread.name,
             minutesInactive: minutesInactive.toFixed(2),
           });
 
-          await cleanupMatch({ thread, voiceChannelId });
+          await cleanupMatch({
+            thread,
+            voiceChannelId,
+            closedByUserOrBot: { id: "system", username: "Auto Cleanup" },
+            closureReason: "Inactivity",
+          });
         } else {
-          logger.info("⌛ Thread still active — skipping", {
+          logger.info("⌛ Match thread still active — skipping", {
             threadName: thread.name,
             minutesInactive: minutesInactive.toFixed(2),
           });
         }
-      } catch (err) {
-        logger.errorWrapper("❌ Cleanup failed for thread", err, {
-          threadName: thread.name,
-        });
       }
+    } catch (err) {
+      logger.errorWrapper("❌ Error during cleanupMatches run", err, {
+        guildId: guild.id,
+        guildName: guild.name,
+      });
     }
-  });
+  }
 }
 
 function formatMentions(msg) {
@@ -492,6 +492,14 @@ async function generateMatchTranscript(
     let platform = matchInfo?.platform || "Unknown";
     const formationType = matchInfo?.formation_type || "Unknown";
 
+    const matchDetails = await db.getAsync(
+      `SELECT vc_match, shared_nightlords FROM matches WHERE match_id = ?`,
+      [match_id]
+    );
+
+    const vcRespected = matchDetails?.vc_match;
+    const sharedNightlords = matchDetails?.shared_nightlords || null;
+
     if (!match_id) {
       logger.warn("❌ Missing match_id for thread", {
         threadName: thread.name,
@@ -508,7 +516,14 @@ async function generateMatchTranscript(
     platform = platformMap[platform.toLowerCase()] || platform;
 
     if (!initialPlayers.length && matchInfo.initial_player_ids) {
-      initialPlayers = matchInfo.initial_player_ids.split(",");
+      try {
+        const raw = matchInfo.initial_player_ids;
+        initialPlayers = raw.includes("[")
+          ? JSON.parse(raw) // if stored as JSON string
+          : raw.split(",");
+      } catch {
+        initialPlayers = matchInfo.initial_player_ids.split(",");
+      }
     }
 
     const allPlayers = await db.allAsync(
@@ -534,7 +549,17 @@ async function generateMatchTranscript(
       .getAsync(`SELECT COUNT(*) AS count FROM matches`)
       .then((row) => row.count);
 
-    const messages = await fetchAllMessages(thread);
+    const messages = await fetchAllMessages(thread).catch((err) => {
+      logger.errorWrapper(
+        "Failed to fetch thread messages for transcript",
+        err,
+        {
+          threadId: thread.id,
+        }
+      );
+      return [];
+    });
+
     const formatted = messages
       .map((msg) => {
         const isSystem =
@@ -592,10 +617,11 @@ async function generateMatchTranscript(
 
     await db.runAsync(
       `INSERT INTO transcripts (
-        id, match_id, thread_id, user_id, username, closed_by, closed_by_username,
-        closure_reason, created_at, closed_at, player_ids,
-        initial_player_ids, interim_player_ids, final_player_ids, platform
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  id, match_id, thread_id, user_id, username, closed_by, closed_by_username,
+  closure_reason, created_at, closed_at, player_ids,
+  initial_player_ids, interim_player_ids, final_player_ids, platform,
+  vc_respected, shared_nightlords
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         transcriptId,
         match_id,
@@ -612,6 +638,8 @@ async function generateMatchTranscript(
         interimPlayers.join(","),
         finalPlayers.join(","),
         platform,
+        vcRespected,
+        sharedNightlords,
       ]
     );
 
@@ -639,6 +667,55 @@ async function generateMatchTranscript(
     const formatTime = (t) => `<t:${Math.floor(t / 1000)}:F>`;
     const durationMin = Math.round(durationMs / 60000);
 
+    // 🎧 VC preference status
+    let vcText = "Not specified";
+    if (vcRespected === 1) vcText = "Yes ✅";
+    else if (vcRespected === 0) vcText = "No ❌";
+
+    // 👹 Shared Nightlords
+    const NIGHTLORD_LABELS = {
+      tricephalos: "Tricephalos",
+      gaping_jaw: "Gaping Jaw",
+      sentient_pest: "Sentient Pest",
+      augur: "Augur",
+      equilibrious_beast: "Equilibrious Beast",
+      darkdrift_knight: "Darkdrift Knight",
+      fissure: "Fissure in the Fog",
+      night_aspect: "Night Aspect",
+    };
+
+    const nightlordText = sharedNightlords
+      ? sharedNightlords
+          .split(",")
+          .map((nl) => NIGHTLORD_LABELS[nl] || nl)
+          .join(", ")
+      : "Not recorded";
+    const cleanId = (entry) => {
+      try {
+        if (typeof entry !== "string") entry = String(entry);
+        return entry.replace(/[^0-9]/g, "").trim(); // Keep only digits
+      } catch {
+        return null;
+      }
+    };
+
+    const formatMentions = (ids) => {
+      if (!ids || ids.length === 0) return "None";
+
+      return (
+        ids
+          .flatMap((item) =>
+            typeof item === "string" && item.includes(",")
+              ? item.split(",")
+              : [item]
+          )
+          .map(cleanId)
+          .filter((id) => id?.length === 18)
+          .map((id) => `<@${id}>`)
+          .join(", ") || "None"
+      );
+    };
+
     const embed = new EmbedBuilder()
       .setColor(0xff0000)
       .setTitle(`📜 Match #${matchCount} Closed`)
@@ -654,7 +731,7 @@ async function generateMatchTranscript(
         },
         {
           name: "👥 Initial Players",
-          value: initialPlayers.map((id) => `<@${id}>`).join(", ") || "None",
+          value: formatMentions(initialPlayers),
         },
         {
           name: "♻️ Interim Players",
@@ -668,6 +745,15 @@ async function generateMatchTranscript(
           name: "🔊 Voice Channel",
           value: voiceChannelId ? `<#${voiceChannelId}>` : "Not created",
           inline: true,
+        },
+        {
+          name: "🎧 VC Preference Respected",
+          value: vcText,
+          inline: true,
+        },
+        {
+          name: "👹 Shared Nightlords",
+          value: nightlordText,
         },
         { name: "📄 Reason", value: closureReason },
         { name: "🕓 Created", value: formatTime(createdAt), inline: true },

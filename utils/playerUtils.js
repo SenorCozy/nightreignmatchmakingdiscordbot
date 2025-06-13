@@ -77,9 +77,31 @@ async function removePlayerFromMatch(
     matchId = matchRow?.match_id;
     const matchStartTime = matchRow?.match_start_time;
 
-    if (!matchId || !matchStartTime) {
-      throw new Error(
-        `Missing match_id or match_start_time for thread ${threadId}`
+    if (!matchId) {
+      // Fallback to channels table for match_id
+      const fallbackRow = await db.getAsync(
+        `SELECT match_id FROM channels WHERE threadId = ?`,
+        [threadId]
+      );
+
+      if (fallbackRow?.match_id) {
+        matchId = fallbackRow.match_id;
+        logger.warn("⚠️ match_id recovered from channels fallback", {
+          threadId,
+          matchId,
+        });
+      } else {
+        throw new Error(`Missing match_id for thread ${threadId}`);
+      }
+    }
+
+    if (!matchStartTime) {
+      logger.warn(
+        "⚠️ match_start_time missing — duration-based stats skipped",
+        {
+          threadId,
+          matchId,
+        }
       );
     }
 
@@ -125,21 +147,20 @@ async function removePlayerFromMatch(
         [finalStatus, matchId, playerId]
       );
 
-      const duration = Math.floor((Date.now() - matchStartTime) / 1000);
-      await addToPlayerMatchTime(playerId, duration);
-      await trackLongestMatchTime(playerId, duration);
-      await addToTotalMatchTime(duration);
-      await updateGlobalLongestMatch(duration);
+      if (matchStartTime) {
+        const duration = Math.floor((Date.now() - matchStartTime) / 1000);
+        await addToPlayerMatchTime(playerId, duration);
+        await trackLongestMatchTime(playerId, duration);
+        await addToTotalMatchTime(duration);
+        await updateGlobalLongestMatch(duration);
 
-      // 🏅 Early completion point (30+ minutes)
-      const matchStart = Number(matchStartTime);
-      if (matchStart) {
+        // 🏅 Early completion point (30+ minutes)
         await awardMatchCompletionPoints(
           matchId,
-          matchStart,
+          matchStartTime,
           false,
           playerId,
-          thread?.guild // ✅ Now safe
+          thread?.guild
         );
       }
     }
@@ -363,6 +384,46 @@ async function prioritizePlatformsByQueueTime() {
   return platforms;
 }
 
+/**
+ * Ensures the user has the required role. If not, attempts to add it.
+ * Prevents further action if assignment fails.
+ *
+ * @param {GuildMember} member - The Discord guild member
+ * @param {CommandInteraction|ButtonInteraction} interaction - The interaction object
+ * @param {string} roleId - The required role ID
+ * @returns {Promise<boolean>} Whether the role is present or successfully added
+ */
+async function ensureRequiredRole(member, interaction, roleId) {
+  if (member.roles.cache.has(roleId)) return true;
+
+  try {
+    await member.roles.add(roleId);
+    logger.info("🔐 Assigned required role for queue access", {
+      playerId: member.id,
+      roleId,
+    });
+    return true;
+  } catch (err) {
+    logger.errorWrapper("❌ Failed to assign required queue role", err, {
+      playerId: member.id,
+      roleId,
+    });
+
+    // Avoid double replies
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction
+        .reply({
+          content:
+            "❌ I couldn’t assign the required matchmaking role. Please contact a moderator.",
+          flags: 64,
+        })
+        .catch(() => {});
+    }
+
+    return false;
+  }
+}
+
 module.exports = {
   removePlayerFromMatch,
   calculateAverageQueueTime,
@@ -370,4 +431,5 @@ module.exports = {
   getPlayerById,
   isPlayerInServer,
   prioritizePlatformsByQueueTime,
+  ensureRequiredRole,
 };

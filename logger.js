@@ -3,12 +3,11 @@ const TransportStream = require("winston-transport");
 const axios = require("axios");
 
 // Discord Webhook URL
-const DISCORD_WEBHOOK_URL =
-  "https://discord.com/api/webhooks/1346678762527391836/iD9AddosVbO7glszPqDH1oI_jr6weHDC5nfJZBvZYqmbxbe-a7x74QwwP8eybH6R3AVf"; // Replace with your webhook URL
+const DISCORD_WEBHOOK_URL = process.env.BACKUP_WEBHOOK_URL; // Replace with your webhook URL
 
 // Define the logger
 const logger = createLogger({
-  level: "info", // Log only errors
+  level: "debug", // Log only errors
   format: format.combine(
     format.timestamp({ format: "YYYY-MM-DD HH:mm:ss" }),
     format.errors({ stack: true }),
@@ -16,12 +15,13 @@ const logger = createLogger({
   ),
   transports: [
     new transports.Console({
+      level: "debug", // ✅ Enable debug logs in PM2 console
       format: format.combine(
         format.colorize(),
-        format.printf(({ level, message, timestamp, stack }) => {
-          return stack
-            ? `[${timestamp}] ${level}: ${message}\n${stack}`
-            : `[${timestamp}] ${level}: ${message}`;
+        format.printf(({ level, message, timestamp, ...meta }) => {
+          return `[${timestamp}] ${level}: ${message}${
+            Object.keys(meta).length ? "\n" + JSON.stringify(meta, null, 2) : ""
+          }`;
         })
       ),
     }),

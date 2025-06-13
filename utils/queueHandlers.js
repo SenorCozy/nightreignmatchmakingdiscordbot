@@ -10,6 +10,7 @@ const db = require("../database");
 const logger = require("../logger");
 const { playerPlatformSelection } = require("../utils/globalState");
 const { evaluateEventProgress } = require("../utils/eventUtils");
+const { showDuoPreferenceMenus } = require("../utils/showDuoPreferenceMenus");
 const {
   getPlayerById,
   getQueuePosition,
@@ -27,6 +28,7 @@ const {
   updateQueueStatistics,
   trackUniqueUser,
 } = require("../utils/statistics");
+const { pendingDuoQueue } = require("../state/pendingDuoQueue");
 
 const { enforceQueueCooldown } = require("../utils/queueCooldown");
 async function processSoloQueuePostActions(playerId, platform) {
@@ -188,50 +190,23 @@ async function handleDuoQueue(interaction) {
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
             .setCustomId("duo_partner_username")
-            .setLabel("Partner's Unique discord name.")
+            .setLabel("Partner's Unique Discord Username")
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
-            .setPlaceholder("Provide duo partner's UNIQUE discord username")
+            .setPlaceholder("Example: cozycat")
         )
       );
 
-    await interaction.showModal(modal);
+    return await interaction.showModal(modal); // ✅ Must be first and only reply
   } catch (error) {
-    logger.errorWrapper("handleDuoQueue", error, { playerId });
-    await interaction.reply({
-      content: "❌ An error occurred while preparing your duo queue.",
-      flags: 64,
-    });
-  }
-}
+    logger.errorWrapper("❌ handleDuoQueue failed", error, { playerId });
 
-async function processDuoQueuePostActions(playerId, friendId, platform) {
-  try {
-    await Promise.all([
-      updateQueueStatistics(playerId, platform, "duo"),
-      updateQueueStatistics(friendId, platform, "duo"),
-      trackUniqueUser(playerId),
-      trackUniqueUser(friendId),
-      updateDuoPartnerStatistics(playerId, friendId),
-      evaluateEventProgress(playerId, "queue_entries", 1),
-      evaluateEventProgress(friendId, "queue_entries", 1),
-      evaluateEventProgress(playerId, "queue_duo", 1),
-      evaluateEventProgress(friendId, "queue_duo", 1),
-      evaluateEventProgress(playerId, "queue_with_user", {
-        partnerId: friendId,
-      }),
-      evaluateEventProgress(friendId, "queue_with_user", {
-        partnerId: playerId,
-      }),
-      incrementBotStatistic("total_queue_entries", 2),
-      incrementBotStatistic(`queue_entries_${platform}`, 2),
-      incrementBotStatistic("queue_entries_duo", 1),
-    ]);
-  } catch (err) {
-    logger.errorWrapper("processDuoQueuePostActions", err, {
-      playerId,
-      friendId,
-    });
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: "❌ An error occurred while preparing your duo queue.",
+        flags: 64,
+      });
+    }
   }
 }
 
@@ -354,63 +329,61 @@ async function handleDuoQueueModal(interaction) {
     });
   }
 
-  const now = Date.now();
+  const REQUIRED_ROLE_ID = process.env.NIGHTREIGN_ROLE;
+  const duoMembers = [
+    { id: playerId, tag: interaction.user.tag },
+    { id: friendId, tag: friend.user.tag },
+  ];
 
-  // ✅ Duo insert/update
-  await Promise.all([
-    db.runAsync(
-      `INSERT INTO players (id, platform, status, duoPartner, queue_entered_at)
-       VALUES (?, ?, 'queued', ?, ?)
-       ON CONFLICT(id) DO UPDATE SET platform = excluded.platform, status = 'queued', duoPartner = excluded.duoPartner, queue_entered_at = excluded.queue_entered_at`,
-      [playerId, platform, friendId, now]
-    ),
-    db.runAsync(
-      `INSERT INTO players (id, platform, status, duoPartner, queue_entered_at)
-       VALUES (?, ?, 'queued', ?, ?)
-       ON CONFLICT(id) DO UPDATE SET platform = excluded.platform, status = 'queued', duoPartner = excluded.duoPartner, queue_entered_at = excluded.queue_entered_at`,
-      [friendId, platform, playerId, now]
-    ),
-  ]);
+  for (const memberData of duoMembers) {
+    try {
+      const member = await interaction.guild.members.fetch(memberData.id);
 
-  await Promise.all([
-    db.runAsync(
-      `INSERT INTO queue_history (playerId, platform, duoPartner, queue_entered_at)
-       VALUES (?, ?, ?, ?)`,
-      [playerId, platform, friendId, now]
-    ),
-    db.runAsync(
-      `INSERT INTO queue_history (playerId, platform, duoPartner, queue_entered_at)
-       VALUES (?, ?, ?, ?)`,
-      [friendId, platform, playerId, now]
-    ),
-  ]);
+      if (!member.roles.cache.has(REQUIRED_ROLE_ID)) {
+        await member.roles.add(REQUIRED_ROLE_ID);
+        logger.info("🔐 Assigned required role for queue access", {
+          playerId: memberData.id,
+          roleId: REQUIRED_ROLE_ID,
+        });
+      }
+    } catch (err) {
+      logger.errorWrapper("❌ Failed to assign required queue role", err, {
+        playerId: memberData.id,
+        roleId: REQUIRED_ROLE_ID,
+      });
 
-  const queuePosition = await getQueuePosition(playerId, platform);
-  const avgWaitTime = await calculateAverageQueueTime(platform, "duo");
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction
+          .reply({
+            content: `❌ I couldn’t assign the required role to <@${memberData.id}>. Please contact a moderator.`,
+            flags: 64,
+          })
+          .catch(() => {});
+      }
 
-  logger.info("✅ Duo queue success", {
+      return;
+    }
+  }
+
+  // 🧠 Store temporary state for post-preference insertion
+  pendingDuoQueue.set(playerId, {
+    friendId,
+    platform,
+    timestamp: Date.now(),
+  });
+  pendingDuoQueue.set(friendId, {
+    friendId: playerId,
+    platform,
+    timestamp: Date.now(),
+  });
+
+  logger.info("✅ Duo queue validated, awaiting preferences", {
     initiator: interaction.user.tag,
     partner: friend.user.tag,
     platform,
   });
 
-  await interaction.reply({
-    content: `✅ You and <@${friendId}> have joined the **Duo** queue for **${platform.toUpperCase()}**.\n**Queue Position:** ${queuePosition}\n**Estimated Wait Time:** ${Math.round(
-      avgWaitTime / 60000
-    )} minutes.`,
-    components: [
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("remove_from_queue")
-          .setLabel("Leave Queue")
-          .setStyle(ButtonStyle.Danger)
-      ),
-    ],
-    flags: 64,
-  });
-
-  // 📊 Defer stat/event tracking
-  processDuoQueuePostActions(playerId, friendId, platform);
+  await showDuoPreferenceMenus(playerId, friendId, interaction);
 }
 
 async function handleTrioQueue(interaction) {
@@ -453,6 +426,7 @@ async function handleTrioQueue(interaction) {
       });
     }
 
+    // ✅ Modal must be the first and only response
     const modal = new ModalBuilder()
       .setCustomId("trio_partner_modal")
       .setTitle("Enter Your Two Teammates' Discord Usernames")
@@ -473,13 +447,18 @@ async function handleTrioQueue(interaction) {
         )
       );
 
-    await interaction.showModal(modal);
+    return await interaction.showModal(modal); // ✅ First and only response
   } catch (error) {
-    logger.errorWrapper("handleTrioQueue", error, { playerId });
-    await interaction.reply({
-      content: "❌ An error occurred while preparing your trio queue.",
-      flags: 64,
-    });
+    logger.errorWrapper("❌ handleTrioQueue failed", error, { playerId });
+
+    try {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: "❌ An error occurred while preparing your trio queue.",
+          flags: 64,
+        });
+      }
+    } catch {}
   }
 }
 
@@ -496,8 +475,8 @@ async function postProcessTrioQueue(playerIds, platform) {
 
       const others = playerIds.filter((x) => x !== id);
       await evaluateEventProgress(id, "queue_entries", 1);
-      await evaluateEventProgress(id, "queue_trio", 1);
-      await evaluateEventProgress(id, "queue_with_user", {
+      await evaluateEventProgress(id, "trio_queues", 1);
+      await evaluateEventProgress(id, "play_with_user", {
         partnerIds: others,
       });
     }
@@ -513,6 +492,8 @@ async function handleTrioQueueModal(interaction) {
   const playerId = interaction.user.id;
   const platform = playerPlatformSelection[playerId];
   const now = Date.now();
+
+  await interaction.deferReply({ flags: 64 }); // ✅ Defer first
 
   try {
     const partner1Username = interaction.fields
@@ -530,16 +511,14 @@ async function handleTrioQueueModal(interaction) {
         interaction.user.username.toLowerCase()
       )
     ) {
-      return interaction.reply({
+      return interaction.editReply({
         content: "❌ Please enter two **different** teammates, not yourself.",
-        flags: 64,
       });
     }
 
     if (!platform) {
-      return interaction.reply({
+      return interaction.editReply({
         content: "❌ Platform not found. Please try again.",
-        flags: 64,
       });
     }
 
@@ -556,29 +535,25 @@ async function handleTrioQueueModal(interaction) {
 
     const partnerIds = [member1?.id, member2?.id];
     if (!member1 || !member2 || partnerIds.includes(undefined)) {
-      return interaction.reply({
+      return interaction.editReply({
         content: `❌ Could not find one or both teammates. Make sure usernames are correct and they are in the server.`,
-        flags: 64,
       });
     }
 
     if ([member1.user.bot, member2.user.bot].includes(true)) {
-      return interaction.reply({
+      return interaction.editReply({
         content: "🤖 You cannot queue with bots as teammates.",
-        flags: 64,
       });
     }
 
-    // Blacklist check
     for (const id of partnerIds) {
       const isBlacklisted = await db.getAsync(
         `SELECT 1 FROM blacklist WHERE id = ?`,
         [id]
       );
       if (isBlacklisted) {
-        return interaction.reply({
+        return interaction.editReply({
           content: `🚫 <@${id}> is blacklisted and cannot join the queue.`,
-          flags: 64,
         });
       }
     }
@@ -587,9 +562,8 @@ async function handleTrioQueueModal(interaction) {
     const players = await Promise.all(allIds.map((id) => getPlayerById(id)));
     for (const [i, p] of players.entries()) {
       if (p?.status === "active") {
-        return interaction.reply({
+        return interaction.editReply({
           content: `<@${allIds[i]}> is already in an active match.`,
-          flags: 64,
         });
       }
     }
@@ -604,11 +578,39 @@ async function handleTrioQueueModal(interaction) {
       logger.warn("⚠️ Prevented new trio queue due to existing active trio", {
         attempted: allIds,
       });
-      return interaction.reply({
+      return interaction.editReply({
         content:
           "⚠️ One or more members are already in an active trio. Please resolve or wait before creating a new trio queue.",
-        flags: 64,
       });
+    }
+
+    const REQUIRED_ROLE_ID = process.env.NIGHTREIGN_ROLE;
+
+    for (const id of allIds) {
+      try {
+        const member = await interaction.guild.members.fetch(id);
+        if (!member.roles.cache.has(REQUIRED_ROLE_ID)) {
+          await member.roles.add(REQUIRED_ROLE_ID);
+          logger.info("🔐 Assigned required role for queue access", {
+            playerId: id,
+            roleId: REQUIRED_ROLE_ID,
+          });
+        }
+      } catch (err) {
+        logger.errorWrapper("❌ Failed to assign required queue role", err, {
+          playerId: id,
+          roleId: REQUIRED_ROLE_ID,
+        });
+
+        if (id === playerId) {
+          await interaction.editReply({
+            content:
+              "❌ I couldn’t assign you the required role to join matchmaking. Please contact a moderator.",
+          });
+        }
+
+        return;
+      }
     }
 
     const trioId = crypto.randomUUID();
@@ -619,7 +621,6 @@ async function handleTrioQueueModal(interaction) {
       [trioId, playerId, partnerIds[0], partnerIds[1], now]
     );
 
-    // Insert all trio members into the queue
     for (const id of allIds) {
       await db.runAsync(
         `INSERT OR REPLACE INTO players (id, platform, status, queue_entered_at)
@@ -634,7 +635,6 @@ async function handleTrioQueueModal(interaction) {
       );
     }
 
-    // ✅ Run post-processing separately (non-blocking)
     postProcessTrioQueue(allIds, platform);
 
     const queuePosition = await getQueuePosition(playerId, platform);
@@ -647,7 +647,7 @@ async function handleTrioQueueModal(interaction) {
       platform,
     });
 
-    return interaction.reply({
+    return interaction.editReply({
       content:
         `✅ You, <@${partnerIds[0]}>, and <@${
           partnerIds[1]
@@ -664,7 +664,6 @@ async function handleTrioQueueModal(interaction) {
             .setStyle(ButtonStyle.Danger)
         ),
       ],
-      flags: 64,
     });
   } catch (error) {
     logger.errorWrapper("handleTrioQueueModal", error, {
@@ -675,9 +674,8 @@ async function handleTrioQueueModal(interaction) {
       },
     });
 
-    return interaction.reply({
+    return interaction.editReply({
       content: "❌ An error occurred while processing your trio queue request.",
-      flags: 64,
     });
   }
 }

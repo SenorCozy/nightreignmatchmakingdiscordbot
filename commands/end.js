@@ -104,13 +104,6 @@ module.exports = {
         });
       }
 
-      if (!activePlayers.includes(userId)) {
-        return interaction.reply({
-          content: "❌ You are not a participant in this match.",
-          flags: 64,
-        });
-      }
-
       // Moderator override
       if (hasModRole(interaction.member)) {
         try {
@@ -130,6 +123,33 @@ module.exports = {
           }
         } catch (err) {
           logger.errorWrapper("Error during mod override cleanupMatch", err);
+        }
+
+        activeMatchEndVotes.delete(thread.id);
+        matchEndCollectors.delete(thread.id);
+        return;
+      }
+
+      if (!activePlayers.includes(userId)) {
+        return interaction.reply({
+          content: "❌ You are not a participant in this match.",
+          flags: 64,
+        });
+      }
+
+      // If only one player is left active, allow immediate closure
+      if (activePlayers.length === 1 && activePlayers[0] === userId) {
+        await interaction.deferReply({ flags: 64 });
+        await safeSend(thread, "☑️ Only one player remains. Closing match...");
+        const proceed = await countdown(thread);
+        if (proceed) {
+          await cleanupMatch({
+            thread,
+            voiceChannelId,
+            closedByUserOrBot: interaction.user,
+            closureReason:
+              "Match ended automatically (only one player remained)",
+          });
         }
 
         activeMatchEndVotes.delete(thread.id);

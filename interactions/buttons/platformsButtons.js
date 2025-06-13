@@ -89,10 +89,17 @@ module.exports = {
       );
 
       try {
-        await interaction.reply({
-          content: "❌ Something went wrong while selecting your platform.",
-          flags: 64,
-        });
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({
+            content: "❌ Something went wrong while selecting your platform.",
+            flags: 64,
+          });
+        } else {
+          await interaction.reply({
+            content: "❌ Something went wrong while selecting your platform.",
+            flags: 64,
+          });
+        }
       } catch (fallbackErr) {
         logger.warn("⚠️ Failed to send fallback platform error", {
           playerId,

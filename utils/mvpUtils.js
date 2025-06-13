@@ -51,7 +51,7 @@ async function isMatchOldEnough(matchId) {
   }
 }
 
-// ✅ 3. Max 5 MVPs given per day
+// ✅ 3. Max 20 MVPs given per day
 async function hasGivenTooManyToday(giverId) {
   try {
     const row = await db.getAsync(

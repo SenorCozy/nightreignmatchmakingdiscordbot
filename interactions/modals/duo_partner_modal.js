@@ -6,10 +6,11 @@ module.exports = {
 
   async execute(interaction) {
     try {
-      logger.info("📥 Modal received", {
+      logger.info("📥 Duo modal received", {
         user: interaction.user.tag,
         customId: interaction.customId,
       });
+
       await handleDuoQueueModal(interaction);
     } catch (err) {
       logger.errorWrapper("❌ Failed to execute duo_partner_modal", err, {
@@ -17,13 +18,15 @@ module.exports = {
         customId: interaction.customId,
       });
 
+      const errorReply = {
+        content: "❌ Something went wrong while handling the modal.",
+        flags: 64,
+      };
+
       if (!interaction.replied && !interaction.deferred) {
-        await interaction
-          .reply({
-            content: "❌ Something went wrong while handling the modal.",
-            flags: 64,
-          })
-          .catch(() => {});
+        await interaction.reply(errorReply).catch(() => {});
+      } else {
+        await interaction.followUp(errorReply).catch(() => {});
       }
     }
   },

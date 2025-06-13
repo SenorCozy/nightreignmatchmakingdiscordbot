@@ -4,6 +4,8 @@ const {
   unlockAchievementIfNotEarned,
   checkMatchCompletionPointAchievements,
 } = require("./achievementHelpers");
+const { EmbedBuilder } = require("discord.js");
+const QUEUE_ALERT_CHANNEL = process.env.QUEUE_ALERT_CHANNEL;
 
 async function awardMatchCompletionPoints(
   match_id,
@@ -36,18 +38,17 @@ async function awardMatchCompletionPoints(
 
     const playerIds = playerIdOverride
       ? [playerIdOverride]
-      : await new Promise((res, rej) =>
-          db.all(
+      : await db
+          .allAsync(
             `SELECT playerId FROM match_players WHERE match_id = ? AND status = 'active'`,
-            [match_id],
-            (err, rows) => (err ? rej(err) : res(rows.map((r) => r.playerId)))
+            [match_id]
           )
-        );
+          .then((rows) => rows.map((r) => r.playerId));
 
     for (const playerId of playerIds) {
       await db.runAsync(
         `INSERT OR IGNORE INTO match_completion_awards (match_id, player_id, awarded_at, points)
-           VALUES (?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?)`,
         [match_id, playerId, now, points]
       );
 
@@ -64,6 +65,26 @@ async function awardMatchCompletionPoints(
     logger.info(
       `🏅 Awarded +${points} point(s) to ${playerIds.length} player(s) for match ${match_id} (${matchDurationMin}m)`
     );
+
+    // 🎯 Send embed to queue alert channel
+    if (guild && QUEUE_ALERT_CHANNEL) {
+      const channel = guild.channels.cache.get(QUEUE_ALERT_CHANNEL);
+      if (channel?.isTextBased?.()) {
+        const embed = new EmbedBuilder()
+          .setTitle("🏅 Match Completion Points Awarded")
+          .setDescription(
+            `${playerIds.length} player(s) received **+${points}** point(s)\n` +
+              `⏱️ Match Duration: **${matchDurationMin} minutes**`
+          )
+          .setColor(0xf1c40f)
+          .setFooter({ text: `Match ID: ${match_id}` })
+          .setTimestamp();
+
+        await channel.send({ embeds: [embed] }).catch((err) => {
+          logger.warn("⚠️ Failed to send match point alert embed", { err });
+        });
+      }
+    }
   } catch (err) {
     logger.errorWrapper("awardMatchCompletionPoints", err);
   }
@@ -95,22 +116,22 @@ async function updateMatchCompletionRoles(member, guild) {
       {
         roleId: process.env.MATCH_TIER_1_ROLE_ID,
         points: 100,
-        name: "Tier I Veteran",
+        name: "Tier I Nightfarer",
       },
       {
         roleId: process.env.MATCH_TIER_2_ROLE_ID,
         points: 250,
-        name: "Tier II Veteran",
+        name: "Tier II Remembrance Bearer",
       },
       {
         roleId: process.env.MATCH_TIER_3_ROLE_ID,
         points: 500,
-        name: "Tier III Veteran",
+        name: "Tier III Limveld Adept",
       },
       {
         roleId: process.env.MATCH_TIER_4_ROLE_ID,
         points: 1000,
-        name: "Tier IV Legend",
+        name: "Tier IV Champion of the Night",
       },
     ];
 

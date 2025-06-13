@@ -41,17 +41,21 @@ module.exports = {
         .setTitle("🎮 Welcome to the Nightreign Matchmaking!")
         .setDescription(
           `**How it works**\n\n` +
-            `**1.** Click **Enter Queue** below — you'll be prompted to select a platform.\n\n` +
-            `**2.** Choose how to queue:\n` +
-            `  • **Solo** — matched with two random players\n` +
-            `  • **Duo** — enter one friend's Discord username\n` +
-            `  • **Trio** — enter two Discord usernames for a full premade\n\n` +
-            `**3.** You'll be placed into a private match thread to coordinate.\n\n` +
-            `**4.** Your friends **must be in this server** to be added to queue.\n\n` +
-            `**5.** If you leave while in a duo/trio, your teammates will remain in queue unless they leave too.\n\n` +
-            `📈 **Progression is tracked and rewarded by using this system!**`
+            `**1.** Click **Enter Queue** below — you'll choose your platform and queue type.\n\n` +
+            `**2.** Choose your **Queue Type**:\n` +
+            `  • **Solo** — matched with two other solo players or duos\n` +
+            `  • **Duo** — enter your friend's Discord username (they must be in this server)\n` +
+            `  • **Trio** — enter two Discord usernames for a full premade (must be in the server)\n\n` +
+            `**3.** Select your **Nightlords** — you'll only be matched with others who share at least one similar preference.\n` +
+            `  • The more you select, the faster you'll match.\n` +
+            `  • **ONLY SELECT Nightlords you are currently able to fight!**\n\n` +
+            `**4.** Choose your **Voice Chat (VC) preference** — matches will prioritize this if possible.\n` +
+            `  • If queues are low, VC preference may be ignored.\n\n` +
+            `**5.** Once matched, you'll enter a private match thread to coordinate.\n\n` +
+            `🎁 **Stats, achievements, and rewards** are tracked by participating in the system!\n\n` +
+            `⚠️ If you leave the queue as a duo or trio, your teammates will stay queued unless they leave too.\n`
         )
-        .setColor("#7289DA")
+        .setColor("#8f72da")
         .setImage("attachment://queue_guide.png");
 
       await interaction.editReply({

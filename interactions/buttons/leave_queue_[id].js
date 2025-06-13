@@ -69,7 +69,6 @@ module.exports = {
         ];
         const remaining = trioIds.filter((id) => id !== partnerId);
 
-        // Mark trio inactive
         await db.runAsync(
           `UPDATE trio_partner_groups SET active = 0 WHERE trio_id = ?`,
           [activeTrio.trio_id]
@@ -87,6 +86,7 @@ module.exports = {
           );
           await sendQueueStatusPrompt(guild, otherId, "trio");
         }
+
         await unlockAchievementIfNotEarned(partnerId, "leave_trio");
       }
 

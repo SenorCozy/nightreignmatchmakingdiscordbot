@@ -1,9 +1,8 @@
-const { handleSoloQueue } = require("../../utils/queueHandlers");
+const { showNightlordSelectMenu } = require("../../utils/nightlordSelect");
 const logger = require("../../logger");
 
 module.exports = {
   customId: "duo_no",
-
   async execute(interaction) {
     const userId = interaction.user.id;
 
@@ -13,29 +12,23 @@ module.exports = {
         customId: interaction.customId,
       });
 
-      await handleSoloQueue(interaction);
+      // Show boss selection instead of queuing immediately
+      await showNightlordSelectMenu(interaction);
     } catch (error) {
       logger.errorWrapper("❌ Error in duo_no button", error, {
         userId,
         customId: interaction.customId,
       });
 
+      const response = {
+        content: "❌ Something went wrong while preparing your queue entry.",
+        flags: 64,
+      };
+
       if (!interaction.replied && !interaction.deferred) {
-        await interaction
-          .reply({
-            content:
-              "❌ Something went wrong while processing your solo queue request.",
-            flags: 64,
-          })
-          .catch(() => {});
+        await interaction.reply(response).catch(() => {});
       } else {
-        await interaction
-          .followUp({
-            content:
-              "❌ Something went wrong while processing your solo queue request.",
-            flags: 64,
-          })
-          .catch(() => {});
+        await interaction.followUp(response).catch(() => {});
       }
     }
   },

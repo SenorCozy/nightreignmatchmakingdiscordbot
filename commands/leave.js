@@ -162,50 +162,59 @@ module.exports = {
           );
         }
       } else {
-        const actionRow = new ActionRowBuilder().addComponents(
+        // 🔍 Get current Nightlord preferences
+        let currentPrefs = [];
+        try {
+          const row = await db.getAsync(
+            `SELECT shared_nightlords FROM matches WHERE match_id = ?`,
+            [match_id]
+          );
+          currentPrefs = row?.shared_nightlords
+            ? JSON.parse(row.shared_nightlords)
+            : [];
+        } catch (err) {
+          logger.warn("⚠️ Could not parse shared_nightlords in /leave", {
+            match_id,
+            error: err.message,
+          });
+        }
+
+        const formattedPrefs = currentPrefs.length
+          ? currentPrefs.map((p) => `• ${p}`).join("\n")
+          : "_None currently set._";
+
+        const updateRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
-            .setCustomId("end_match_now")
-            .setLabel("End Match Immediately")
-            .setStyle(ButtonStyle.Danger),
+            .setCustomId("update_shared_nightlords_button")
+            .setLabel("Update Nightlord Preferences")
+            .setStyle(ButtonStyle.Secondary),
           new ButtonBuilder()
             .setCustomId("find_replacement")
             .setLabel("Find Replacement from Queue")
-            .setStyle(ButtonStyle.Primary)
+            .setStyle(ButtonStyle.Primary),
+          new ButtonBuilder()
+            .setCustomId("end_match_now")
+            .setLabel("End Match Immediately")
+            .setStyle(ButtonStyle.Danger)
         );
 
-        try {
-          await safeSend(thread, {
-            content: `<@${remaining
-              .map((p) => p.playerId)
-              .join(
-                ">, <@"
-              )}>: A player has left the match.\nWould you like to end the match or search for a replacement?`,
-            components: [actionRow],
-          });
-        } catch (err) {
-          logger.errorWrapper(
-            "Failed to send match continuation buttons in /leave",
-            err,
-            {
-              threadId: thread.id,
-            }
-          );
-        }
+        await safeSend(thread, {
+          content: `⚠️ A player has left the match.\n\n**Current Nightlord Preferences:**\n${formattedPrefs}\n\nWould you like to update preferences before searching for a replacement or ending the match?`,
+          components: [updateRow],
+        });
       }
-
-      return interaction.reply({
-        content: "✅ You have left the match.",
-        flags: 64,
-      });
     } catch (err) {
       logger.errorWrapper("❌ Error executing /leave", err, {
         threadId: thread?.id,
         playerId,
       });
-      return interaction.reply({
-        content: "❌ An error occurred while trying to leave the match.",
-        flags: 64,
-      });
+
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: "❌ An error occurred while trying to leave the match.",
+          flags: 64,
+        });
+      }
     }
   },
 };

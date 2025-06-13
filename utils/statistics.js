@@ -103,54 +103,18 @@ async function updateQueueStatistics(
 
 async function trackUniqueUser(userId) {
   try {
-    const isTracked = await new Promise((resolve, reject) => {
-      db.get(
-        `SELECT id FROM player_statistics WHERE id = ?`,
-        [userId],
-        (err, row) => {
-          if (err) {
-            logger.errorWrapper("TrackUser_Check", err, { userId });
-            return reject(err);
-          }
-          resolve(!!row); // true if exists
-        }
+    const result = await db.runAsync(
+      `INSERT OR IGNORE INTO player_statistics (id) VALUES (?)`,
+      [userId]
+    );
+
+    // Check if the insert actually happened (SQLite returns changes: 1 if new row)
+    if (result?.changes > 0) {
+      await db.runAsync(
+        `INSERT INTO bot_statistics (stat_key, stat_value)
+         VALUES ('unique_users', 1)
+         ON CONFLICT(stat_key) DO UPDATE SET stat_value = stat_value + 1`
       );
-    });
-
-    if (!isTracked) {
-      // 1. Add to player_statistics
-      await new Promise((resolve, reject) => {
-        db.run(
-          `INSERT INTO player_statistics (id) VALUES (?)`,
-          [userId],
-          (err) => {
-            if (err) {
-              logger.errorWrapper("TrackUser_Insert_StatTable", err, {
-                userId,
-              });
-              return reject(err);
-            }
-            resolve();
-          }
-        );
-      });
-
-      // 2. Increment unique_users stat
-      await new Promise((resolve, reject) => {
-        db.run(
-          `INSERT INTO bot_statistics (stat_key, stat_value)
-           VALUES ('unique_users', 1)
-           ON CONFLICT(stat_key) DO UPDATE SET stat_value = stat_value + 1`,
-          [],
-          (err) => {
-            if (err) {
-              logger.errorWrapper("TrackUser_Insert_Unique", err, { userId });
-              return reject(err);
-            }
-            resolve();
-          }
-        );
-      });
 
       logger.info(`🧍 Tracked new unique user: ${userId}`);
     }

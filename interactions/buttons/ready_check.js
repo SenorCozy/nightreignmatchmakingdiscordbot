@@ -14,14 +14,14 @@ module.exports = {
     const thread = interaction.channel;
     const userId = interaction.user.id;
 
-    await interaction.deferReply().catch((err) =>
-      logger.warn("⚠️ Failed to defer ready_check interaction", {
-        threadId: thread?.id,
-        error: err.message,
-      })
-    );
-
     try {
+      await interaction.deferReply().catch((err) =>
+        logger.warn("⚠️ Failed to defer ready_check interaction", {
+          threadId: thread?.id,
+          error: err.message,
+        })
+      );
+
       if (!thread?.isThread()) {
         return interaction.editReply({
           content: "❌ This must be used inside a match thread.",

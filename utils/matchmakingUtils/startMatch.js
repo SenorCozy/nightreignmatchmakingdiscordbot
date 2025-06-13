@@ -31,6 +31,17 @@ const {
   checkPlatformDiversity,
 } = require("../../utils/achievementHelpers");
 
+const NIGHTLORD_LABELS = {
+  tricephalos: "Tricephalos",
+  gaping_jaw: "Gaping Jaw",
+  sentient_pest: "Sentient Pest",
+  augur: "Augur",
+  equilibrious_beast: "Equilibrious Beast",
+  darkdrift_knight: "Darkdrift Knight",
+  fissure: "Fissure in the Fog",
+  night_aspect: "Night Aspect",
+};
+
 function generateMatchPassword() {
   const chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -45,7 +56,8 @@ async function startMatch(
   client,
   platform,
   players,
-  formationType = "unknown"
+  formationType = "unknown",
+  overlapInfo = null
 ) {
   if (!players?.length) {
     logger.warn("startMatch was called with an empty match list.");
@@ -98,12 +110,50 @@ async function startMatch(
       return;
     }
 
+    function sanitizeUsername(name) {
+      // Lowercase, keep a-z, 0-9, ., _
+      let safe = name.toLowerCase().replace(/[^a-z0-9._]/g, "");
+
+      // Replace double dots with single
+      while (safe.includes("..")) {
+        safe = safe.replace(/\.\.+/g, ".");
+      }
+
+      // Enforce length
+      return safe.slice(0, 32);
+    }
+
+    function buildChannelName(prefix, usernames, maxLength = 100) {
+      const base = `${prefix}-${usernames.join("-")}`;
+      return base.length <= maxLength
+        ? base
+        : `${prefix}-${usernames.slice(0, 3).join("-")}-etc`;
+    }
+
+    // Fetch usernames
+    const usernames = await Promise.all(
+      players.map(async (id) => {
+        try {
+          const user = await client.users.fetch(id);
+          return sanitizeUsername(user.username);
+        } catch {
+          return "unknown";
+        }
+      })
+    );
+
+    // Fallback if all usernames are broken
+    const nameBase = usernames.filter(Boolean).length
+      ? buildChannelName("match", usernames)
+      : `match-${matchId.slice(0, 8)}`;
+
+    // Create thread
     const thread = await platformChannel.threads.create({
-      name: `match-${players.join("-")}`,
+      name: nameBase,
       autoArchiveDuration: 1440,
       type: ChannelType.GuildPrivateThread,
       invitable: false,
-      reason: `Creating match thread for ${players.join(", ")}`,
+      reason: `Creating match thread for ${usernames.join(", ")}`,
     });
 
     if (!thread) {
@@ -115,19 +165,22 @@ async function startMatch(
     const timestamp = Date.now();
     logger.debug(`📌 Tracked initialPlayers for ${thread.id}:`, players);
 
+    const now = Date.now();
+
     await db.runAsync(
-      `INSERT INTO matches 
-       (match_id, thread_id, platform, created_by, created_at, match_start_time, formation_type, initial_player_ids)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO matches (match_id, thread_id, platform, created_by, created_at, match_start_time, formation_type, initial_player_ids, shared_nightlords, vc_match)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         matchId,
         thread.id,
         platform,
         players[0],
-        timestamp,
-        timestamp,
+        now,
+        now, // match_start_time
         formationType,
-        players.join(","),
+        JSON.stringify(players),
+        JSON.stringify(overlapInfo.sharedBosses || []),
+        overlapInfo.vcMatch ? 1 : 0,
       ]
     );
 
@@ -222,24 +275,68 @@ async function startMatch(
     );
 
     const instructions = [
-      `🎮 **Match started!**`,
+      `🎮 **Match Started!**`,
       `**Players:** ${players.map((id) => `<@${id}>`).join(", ")}`,
-      ``,
-      `__**🎛️ Match Controls**__`,
-      `• 🎤 **Create Voice Channel** — Instantly creates a private VC for your team.`,
-      `• ✅ **Ready Check** — Starts a 3-minute timer. Unready players are kicked and replaced. You can also use \`/ready\`.`,
-      `• 🚪 **Leave Match** — Leave the match. Teammates can replace you via \`/search\`.`,
-      `• ⛔ **End Match** — Calls to end the match. Requires one other match player to confirm. You can also use \`/end\`.`,
-      ``,
-      `__**📌 Tips & Info**__`,
-      `•  This system is **in beta** — expect bugs! **Mention @eldentickethandlers for support.**`,
-      `•  Use \`/search\` to replace players who leave.`,
-      `•  Use \`/status thread\` to view match stats and participants.`,
-      ``,
-      `• 🔐 Suggested Match Password: \`${password}\` *(case-sensitive)*`,
-      `\u200B`, // <-- invisible padding line to ensure space before buttons
+      ``, // spacing
     ];
 
+    // 🧠 Nightlord preference (duos/solos only)
+    if (formationType !== "trio" && overlapInfo?.sharedBosses?.length) {
+      const bossNames = overlapInfo.sharedBosses
+        .map((val) => NIGHTLORD_LABELS[val] || val)
+        .join(", ");
+
+      instructions.push(
+        `🧠 **Shared Nightlord Preferences**`,
+        `You all share **${overlapInfo.overlapCount}** Nightlord(s):`,
+        `• ${bossNames}`,
+        ``
+      );
+    }
+
+    // 🎧 VC preference (duos/solos only)
+    if (formationType !== "trio") {
+      if (overlapInfo?.vcMatch === true) {
+        instructions.push(`🔊 **All players agreed to use voice chat.**`);
+        await incrementBotStatistic("vc_respected");
+      } else if (overlapInfo?.vcMatch === false) {
+        instructions.push(
+          `🔇 **Voice chat preference was not fully respected.**`
+        );
+        await incrementBotStatistic("vc_not_respected");
+      }
+      instructions.push(``); // spacing
+    }
+
+    // 🎛️ Controls
+    instructions.push(
+      `🎛️ **Match Controls**`,
+      `• ✅ **Ready Check** — Starts a 3-minute ready check timer, confirm ready with button or Use \`/ready\`.`,
+      `• ⛔ **End Match** — Starts a vote to end the match. Use \`/end\`.`,
+      ``
+    );
+
+    // 💡 Tips & info
+    instructions.push(
+      `📌 **Tips & Info**`,
+      `• This system is **in beta** expect bugs — mention @eldentickethandlers for help.`,
+      `• Use \`/search\` to replace players who leave.`,
+      `• Use \`/status thread\` to view stats.`,
+      `• 🏆 Use \`/mvp\` to award players for clutch plays.`,
+      `• MVP points (currency) can be spent in the \`/shop\` for new roles.`,
+      ``,
+      `• 📚 Read the wiki guide to improve your runs:`,
+      `<https://eldenringnightreign.wiki.fextralife.com/Expeditions>`,
+      ``
+    );
+
+    // 🔐 Password
+    instructions.push(
+      `🔐 **Suggested Match Password:** \`${password}\` *(case-sensitive)*`,
+      `\u200B` // padding
+    );
+
+    // Send to thread
     await thread.send({
       content: instructions.join("\n"),
       components: [buttons],

@@ -26,6 +26,7 @@ module.exports = {
     }
 
     try {
+      // Disable buttons
       const disabledRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId("end_match_now")
@@ -43,13 +44,10 @@ module.exports = {
         components: [disabledRow],
       });
 
-      const match = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT playerIds, voiceChannelId FROM channels WHERE threadId = ?`,
-          [thread.id],
-          (err, row) => (err ? reject(err) : resolve(row))
-        );
-      });
+      const match = await db.getAsync(
+        `SELECT voiceChannelId FROM channels WHERE threadId = ?`,
+        [thread.id]
+      );
 
       if (!match) {
         return interaction
@@ -65,14 +63,12 @@ module.exports = {
           );
       }
 
-      const activePlayerIds = await new Promise((resolve, reject) => {
-        db.all(
+      const activePlayerIds = await db
+        .allAsync(
           `SELECT playerId FROM match_players WHERE threadId = ? AND status = 'active'`,
-          [thread.id],
-          (err, rows) =>
-            err ? reject(err) : resolve(rows.map((r) => r.playerId))
-        );
-      });
+          [thread.id]
+        )
+        .then((rows) => rows.map((r) => r.playerId));
 
       const missingCount = 3 - activePlayerIds.length;
 

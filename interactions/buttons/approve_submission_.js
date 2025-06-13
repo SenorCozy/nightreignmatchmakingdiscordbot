@@ -1,10 +1,7 @@
 const db = require("../../database");
 const logger = require("../../logger");
 const { evaluateEventProgress } = require("../../utils/eventUtils");
-const {
-  unlockAchievementIfNotEarned,
-  checkCurrencyAchievements,
-} = require("../../utils/achievementHelpers");
+const { checkCurrencyAchievements } = require("../../utils/achievementHelpers");
 
 const MODERATOR_ROLE_IDS = [
   process.env.TICKET_HANDLER_ROLE,
@@ -45,11 +42,19 @@ module.exports = {
         });
       }
 
-      const reward = await db.getAsync(
-        `SELECT reward FROM events WHERE event_id = ?`,
+      const event = await db.getAsync(
+        `SELECT currency_reward, match_point_reward FROM events WHERE event_id = ?`,
         [submission.event_id]
       );
-      const amount = reward?.reward || 10;
+
+      if (!event) {
+        return interaction.reply({
+          content: "❌ Event not found. Cannot approve submission.",
+          flags: 64,
+        });
+      }
+
+      const { currency_reward = 0, match_point_reward = 0 } = event;
 
       await db.runAsync(
         `UPDATE event_submissions
@@ -66,41 +71,64 @@ module.exports = {
       const alertChannelId = process.env.QUEUE_ALERT_CHANNEL;
       const alertChannel =
         interaction.client.channels.cache.get(alertChannelId);
-
       const awardedMentions = [];
 
       for (const { player_id } of participants) {
         try {
-          await db.runAsync(
-            `INSERT INTO player_currency (player_id, balance)
-             VALUES (?, ?)
-             ON CONFLICT(player_id) DO UPDATE SET balance = balance + ?`,
-            [player_id, amount, amount]
-          );
-
-          await db.runAsync(
-            `INSERT INTO currency_audit (player_id, amount_changed, source, source_id, modified_by, modified_at, reason)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
-              player_id,
-              amount,
-              "event",
-              submission.event_id,
-              reviewerId,
-              now,
-              `Approved submission ${submissionId}`,
-            ]
-          );
-
-          // ⏱ Defer achievements + event progress
-          setImmediate(() => {
-            checkCurrencyAchievements(player_id, db).catch((err) =>
-              logger.errorWrapper("Currency achievement check failed", err, {
-                playerId: player_id,
-              })
+          // 💰 Award currency
+          if (currency_reward > 0) {
+            await db.runAsync(
+              `INSERT INTO player_currency (player_id, balance)
+               VALUES (?, ?)
+               ON CONFLICT(player_id) DO UPDATE SET balance = balance + ?`,
+              [player_id, currency_reward, currency_reward]
             );
 
-            evaluateEventProgress(player_id, "submission", 1, {
+            await db.runAsync(
+              `INSERT INTO currency_audit (
+                player_id, amount_changed, source, source_id,
+                modified_by, modified_at, reason
+              ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              [
+                player_id,
+                currency_reward,
+                "event",
+                submission.event_id,
+                reviewerId,
+                now,
+                `Approved submission ${submissionId}`,
+              ]
+            );
+          }
+
+          // 🏅 Award match completion points
+          if (match_point_reward > 0) {
+            await db.runAsync(
+              `INSERT INTO match_completion_awards (
+                match_id, player_id, awarded_at, points, modified_by, action_type
+              ) VALUES (?, ?, ?, ?, ?, ?)`,
+              [
+                `submission:${submissionId}`,
+                player_id,
+                now,
+                match_point_reward,
+                reviewerId,
+                "event_submission",
+              ]
+            );
+          }
+
+          // ⏱ Trigger async checks
+          setImmediate(() => {
+            if (currency_reward > 0) {
+              checkCurrencyAchievements(player_id, db).catch((err) =>
+                logger.errorWrapper("Currency achievement check failed", err, {
+                  playerId: player_id,
+                })
+              );
+            }
+
+            evaluateEventProgress(player_id, "manual_submission", 1, {
               event_id: submission.event_id,
               submission_id: submission.submission_id,
             }).catch((err) =>
@@ -110,12 +138,13 @@ module.exports = {
             );
           });
 
-          logger.info("✅ Group submission reward granted", {
+          logger.info("✅ Submission reward granted", {
             submissionId,
             playerId: player_id,
             eventId: submission.event_id,
             reviewerId,
-            amount,
+            currency: currency_reward,
+            matchPoints: match_point_reward,
           });
 
           awardedMentions.push(`<@${player_id}>`);
@@ -132,16 +161,24 @@ module.exports = {
         }
       }
 
+      // 📢 Send approval notice
       if (alertChannel && awardedMentions.length) {
         await alertChannel.send({
-          content: `✅ **Submission Approved**\n${awardedMentions.join(
-            ", "
-          )} were each awarded **${amount} coins**.\nSubmission ID: \`${submissionId}\``,
+          content:
+            `✅ **Submission Approved**\n${awardedMentions.join(
+              ", "
+            )} were awarded:` +
+            (currency_reward > 0 ? ` **${currency_reward} coins**` : "") +
+            (currency_reward > 0 && match_point_reward > 0 ? " and" : "") +
+            (match_point_reward > 0
+              ? ` **${match_point_reward} match points**`
+              : "") +
+            `.\nSubmission ID: \`${submissionId}\``,
         });
       }
 
       await interaction.update({
-        content: `✅ Approved and awarded ${amount} coins to: ${awardedMentions.join(
+        content: `✅ Approved and awarded rewards to: ${awardedMentions.join(
           ", "
         )}`,
         components: [],

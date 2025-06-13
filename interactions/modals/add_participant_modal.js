@@ -4,6 +4,7 @@ const logger = require("../../logger");
 module.exports = {
   customIdRegex: /^add_participant_modal_/,
   async execute(interaction) {
+    await interaction.deferReply({ flags: 64 });
     const submissionId = interaction.customId.split("_").slice(-1)[0];
     const input = interaction.fields.getTextInputValue("participant_ids");
 
@@ -17,9 +18,8 @@ module.exports = {
     }
 
     if (matchedIds.length === 0) {
-      return interaction.reply({
+      return interaction.editReply({
         content: "❌ No valid user IDs or mentions found.",
-        flags: 64,
       });
     }
 
@@ -51,11 +51,10 @@ module.exports = {
       by: interaction.user.id,
     });
 
-    await interaction.reply({
+    await interaction.editReply({
       content: `✅ Added ${successCount} participant(s). ${
         skipped.length ? `Skipped: ${skipped.join(", ")}` : ""
       }`,
-      flags: 64,
     });
   },
 };

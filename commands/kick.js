@@ -4,11 +4,19 @@ const {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  ComponentType,
 } = require("discord.js");
 const db = require("../database");
 const logger = require("../logger");
 const { safeSend } = require("../utils/matchmakingUtils/matchUtils");
-const { activeKickVotes, kickCollectors } = require("../utils/matchVoteState");
+const {
+  activeKickVotes,
+  kickCollectors,
+  voteMessages,
+} = require("../utils/matchVoteState");
+
+const kickCooldowns = new Map(); // key = `${thread.id}:${userId}` => timestamp
+const KICK_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -33,6 +41,32 @@ module.exports = {
         flags: 64,
       });
     }
+    const cooldownKey = thread.id;
+    const lastKickTime = kickCooldowns.get(cooldownKey);
+    const now = Date.now();
+
+    if (lastKickTime && now - lastKickTime < KICK_COOLDOWN_MS) {
+      const remainingSec = Math.ceil(
+        (KICK_COOLDOWN_MS - (now - lastKickTime)) / 1000
+      );
+      return interaction.reply({
+        content: `⏳ A kick vote was recently started in this thread. Please wait **${remainingSec}** seconds before initiating another.`,
+        flags: 64,
+      });
+    }
+
+    // Set new cooldown timestamp for this thread
+    kickCooldowns.set(cooldownKey, now);
+
+    const isKickActive = [...activeKickVotes.keys()].some((key) =>
+      key.startsWith(`${thread.id}:`)
+    );
+    if (isKickActive) {
+      return interaction.reply({
+        content: "⚠️ A kick vote is already in progress. Please wait.",
+        flags: 64,
+      });
+    }
 
     let match;
     try {
@@ -45,7 +79,7 @@ module.exports = {
         threadId: thread.id,
       });
       return interaction.reply({
-        content: "❌ Failed to retrieve match data. Please try again later.",
+        content: "❌ Failed to retrieve match data.",
         flags: 64,
       });
     }
@@ -69,7 +103,7 @@ module.exports = {
         match_id: match.match_id,
       });
       return interaction.reply({
-        content: "❌ Failed to retrieve player list. Please try again later.",
+        content: "❌ Failed to retrieve player list.",
         flags: 64,
       });
     }
@@ -88,32 +122,17 @@ module.exports = {
       });
     }
 
-    // ✅ Track vote state
     const voteKey = `${thread.id}:${playerId}`;
-    if (!activeKickVotes.has(voteKey)) {
-      const initiatorVoteSet = new Set([initiatorId]);
-      activeKickVotes.set(voteKey, initiatorVoteSet);
+    const voters = new Set([initiatorId]);
+    activeKickVotes.set(voteKey, voters);
 
-      const timeout = setTimeout(async () => {
-        if (activeKickVotes.has(voteKey)) {
-          activeKickVotes.delete(voteKey);
-          kickCollectors.delete(voteKey);
-          await safeSend(
-            thread,
-            `⌛ Kick vote for <@${playerId}> expired with insufficient confirmations.`
-          );
-        }
-      }, 60000);
+    const kickButton = new ButtonBuilder()
+      .setCustomId(`confirm_kick_${playerId}`)
+      .setLabel(`Kick ${target.username}`)
+      .setStyle(ButtonStyle.Danger)
+      .setDisabled(false);
 
-      kickCollectors.set(voteKey, { stop: () => clearTimeout(timeout) });
-    }
-
-    const button = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`confirm_kick_${playerId}`)
-        .setLabel(`Kick ${target.username}`)
-        .setStyle(ButtonStyle.Danger)
-    );
+    const row = new ActionRowBuilder().addComponents(kickButton);
 
     const embed = new EmbedBuilder()
       .setColor("Red")
@@ -131,12 +150,82 @@ module.exports = {
         flags: 64,
       });
 
-      await safeSend(thread, {
+      const voteMessage = await safeSend(thread, {
         embeds: [embed],
-        components: [button],
+        components: [row],
+      });
+
+      voteMessages.set(voteKey, voteMessage);
+
+      const collector = thread.createMessageComponentCollector({
+        componentType: ComponentType.Button,
+        time: 60000,
+        filter: (i) =>
+          i.customId === `confirm_kick_${playerId}` &&
+          playerIds.includes(i.user.id) &&
+          !activeKickVotes.get(voteKey)?.has(i.user.id),
+      });
+
+      kickCollectors.set(voteKey, collector);
+
+      collector.on("collect", async (btn) => {
+        try {
+          voters.add(btn.user.id);
+          activeKickVotes.set(voteKey, voters);
+          await btn.deferUpdate().catch(() => {});
+
+          if (voters.size >= 2) {
+            collector.stop("confirmed");
+            const { finalizeKick } = require("./confirm_kick");
+            await finalizeKick({
+              thread,
+              match_id: match.match_id,
+              targetId: playerId,
+              voteKey,
+            });
+          } else {
+            await safeSend(
+              thread,
+              `🗳️ Kick vote updated. (${voters.size}/2 confirmations to remove <@${playerId}>)`
+            );
+          }
+        } catch (err) {
+          logger.errorWrapper("kickCollector collect error", err, { voteKey });
+        }
+      });
+
+      collector.on("end", async (_, reason) => {
+        if (reason === "confirmed") return;
+
+        activeKickVotes.delete(voteKey);
+        kickCollectors.delete(voteKey);
+        voteMessages.delete(voteKey);
+
+        if (voteMessage?.editable) {
+          try {
+            const btn = voteMessage.components?.[0]?.components?.[0];
+            if (btn) {
+              const disabled = ButtonBuilder.from(btn).setDisabled(true);
+              const disabledRow = new ActionRowBuilder().addComponents(
+                disabled
+              );
+              await voteMessage.edit({ components: [disabledRow] });
+            }
+          } catch (err) {
+            logger.warn("⚠️ Failed to disable expired kick button", {
+              voteKey,
+              error: err.message,
+            });
+          }
+        }
+
+        await safeSend(
+          thread,
+          `⌛ Kick vote for <@${playerId}> expired with insufficient votes.`
+        );
       });
     } catch (err) {
-      logger.errorWrapper("Failed to send consolidated vote message", err);
+      logger.errorWrapper("Error sending kick vote UI", err, { voteKey });
     }
   },
 };

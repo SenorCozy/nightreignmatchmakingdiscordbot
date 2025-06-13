@@ -7,6 +7,11 @@ const {
   checkEventCompletionAchievements,
   checkCurrencyAchievements,
 } = require("./achievementHelpers");
+const {
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+  EmbedBuilder,
+} = require("discord.js");
 
 const cron = require("node-cron");
 
@@ -21,10 +26,13 @@ async function evaluateEventProgress(
   try {
     // ✅ Validate goal type
     const knownGoalTypes = goalTypes.map((g) => g.key);
+
     if (!knownGoalTypes.includes(goalType)) {
-      logger.warn(
-        `⚠️ Invalid goalType '${goalType}' passed to evaluateEventProgress`
-      );
+      logger.warn("⚠️ Invalid goalType passed to evaluateEventProgress", {
+        goalType,
+        playerId,
+        validGoalTypes: knownGoalTypes.slice(0, 10), // Show just a few to keep logs clean
+      });
       return;
     }
 
@@ -59,16 +67,32 @@ async function evaluateEventProgress(
             : manualValue;
 
         if (!incrementValue || incrementValue <= 0) continue;
+        if (alreadyComplete) {
+          logger.debug("⛔ Skipping progress: event already complete", {
+            playerId,
+            eventId: event.event_id,
+          });
+          continue;
+        }
 
-        const newProgress = currentProgress + incrementValue;
+        const unclampedProgress = currentProgress + incrementValue;
+        const cappedProgress = Math.min(unclampedProgress, event.goal_target);
+        const newProgress = alreadyComplete ? currentProgress : cappedProgress;
 
         // 🧾 Insert or update progress
         if (!progressRow) {
           await db.runAsync(
             `INSERT INTO event_progress 
-               (player_id, event_id, progress, completed, last_tier_index_awarded, last_increment_at)
-               VALUES (?, ?, ?, ?, ?, ?)`,
-            [playerId, event.event_id, newProgress, 0, 0, now]
+     (player_id, event_id, progress, completed, last_tier_index_awarded, last_increment_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+            [
+              playerId,
+              event.event_id,
+              newProgress,
+              newProgress >= event.goal_target ? 1 : 0,
+              0,
+              now,
+            ]
           );
         } else {
           await db.runAsync(
@@ -94,37 +118,151 @@ async function evaluateEventProgress(
         for (const tier of tiers) {
           if (
             tier.tier_index > lastAwardedTier &&
+            currentProgress < tier.goal_target &&
             newProgress >= tier.goal_target
           ) {
-            await db.runAsync(
-              `INSERT INTO player_currency (player_id, balance)
+            if (tier.currency_reward > 0) {
+              await db.runAsync(
+                `INSERT INTO player_currency (player_id, balance)
                  VALUES (?, ?)
                  ON CONFLICT(player_id) DO UPDATE SET balance = balance + ?`,
-              [playerId, tier.reward, tier.reward]
-            );
+                [playerId, tier.currency_reward, tier.currency_reward]
+              );
 
-            await db.runAsync(
-              `INSERT INTO currency_audit 
+              await db.runAsync(
+                `INSERT INTO currency_audit 
                  (player_id, amount_changed, source, source_id, modified_by, modified_at, reason)
                  VALUES (?, ?, ?, ?, ?, ?, ?)`,
-              [
-                playerId,
-                tier.reward,
-                "event_tier",
-                `${event.event_id}-tier${tier.tier_index}`,
-                "system",
-                now,
-                `Tier ${tier.tier_index} reward for event: ${event.name}`,
-              ]
-            );
+                [
+                  playerId,
+                  tier.currency_reward,
+                  "event_tier",
+                  `${event.event_id}-tier${tier.tier_index}`,
+                  "system",
+                  now,
+                  `Tier ${tier.tier_index} currency reward for event: ${event.name}`,
+                ]
+              );
+            }
+
+            if (tier.match_point_reward > 0) {
+              await db.runAsync(
+                `INSERT OR IGNORE INTO match_completion_awards
+                 (match_id, player_id, awarded_at, points, modified_by, action_type)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+                [
+                  `event-${event.event_id}-tier${tier.tier_index}`,
+                  playerId,
+                  now,
+                  tier.match_point_reward,
+                  "system",
+                  "event_tier_reward",
+                ]
+              );
+            }
 
             await db.runAsync(
               `UPDATE event_progress SET last_tier_index_awarded = ?
-                 WHERE player_id = ? AND event_id = ?`,
+               WHERE player_id = ? AND event_id = ?`,
               [tier.tier_index, playerId, event.event_id]
             );
+            const isFinalTier =
+              tier.tier_index === tiers[tiers.length - 1].tier_index &&
+              newProgress >= tier.goal_target;
 
-            // ✅ Defer achievement check
+            if (isFinalTier) {
+              try {
+                const user = await client.users.fetch(playerId);
+                const channel = await client.channels.fetch(
+                  process.env.QUEUE_ALERT_CHANNEL
+                );
+
+                if (channel && channel.isTextBased()) {
+                  const embed = new EmbedBuilder()
+                    .setColor(0x22c55e) // Green for completion
+                    .setAuthor({
+                      name: `${user.username} completed an event!`,
+                      iconURL: user.displayAvatarURL(),
+                    })
+                    .setTitle(`🏁 ${event.name} Completed`)
+                    .setDescription(
+                      `**${event.description || "Special challenge"}**`
+                    )
+                    .addFields({
+                      name: "Total Progress",
+                      value: `${newProgress}/${event.goal_target}`,
+                      inline: true,
+                    })
+                    .setFooter({ text: "🎉 Event completed" })
+                    .setTimestamp();
+
+                  await channel.send({
+                    content: `🏆 <@${playerId}> has completed **${event.name}**!`,
+                    embeds: [embed],
+                  });
+                }
+              } catch (err) {
+                logger.warn(
+                  "⚠️ Failed to send final event completion alert:",
+                  err
+                );
+              }
+            }
+
+            // 📢 Send event tier or completion alert
+            // 📢 Send event tier or completion alert
+            try {
+              if (event.event_type !== "submission") {
+                const user = await client.users.fetch(playerId);
+                const channel = await client.channels.fetch(
+                  process.env.QUEUE_ALERT_CHANNEL
+                );
+
+                if (channel?.isTextBased()) {
+                  const rewardDisplay = [
+                    tier.currency_reward ? `💰 ${tier.currency_reward}` : "",
+                    tier.match_point_reward
+                      ? `🏅 ${tier.match_point_reward}`
+                      : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" + ");
+
+                  const embed = new EmbedBuilder()
+                    .setColor(0x3b82f6)
+                    .setAuthor({
+                      name: `${user.username} progressed in an event!`,
+                      iconURL: user.displayAvatarURL(),
+                    })
+                    .setTitle(`🎯 ${event.name}`)
+                    .setDescription(
+                      `**${event.description || "Ongoing event"}**`
+                    )
+                    .addFields(
+                      {
+                        name: "Progress",
+                        value: `${newProgress}/${event.goal_target}`,
+                        inline: true,
+                      },
+                      {
+                        name: "Reward",
+                        value: rewardDisplay || "—",
+                        inline: true,
+                      }
+                    )
+                    .setFooter({ text: "Event participation rewarded" })
+                    .setTimestamp();
+
+                  await channel.send({
+                    content: `<@${playerId}> just earned event progress!`,
+                    embeds: [embed],
+                  });
+                }
+              }
+            } catch (err) {
+              logger.warn("⚠️ Failed to send tier reward alert", err);
+            }
+
             setImmediate(() =>
               checkCurrencyAchievements(playerId, db).catch((err) =>
                 logger.error("❌ Currency achievement check failed (tier)", {
@@ -141,32 +279,94 @@ async function evaluateEventProgress(
         // 🎁 Flat reward fallback
         if (
           tiers.length === 0 &&
+          currentProgress < event.goal_target &&
           newProgress >= event.goal_target &&
           !alreadyComplete
         ) {
-          await db.runAsync(
-            `INSERT INTO player_currency (player_id, balance)
+          if (event.currency_reward > 0) {
+            await db.runAsync(
+              `INSERT INTO player_currency (player_id, balance)
                VALUES (?, ?)
                ON CONFLICT(player_id) DO UPDATE SET balance = balance + ?`,
-            [playerId, event.reward, event.reward]
-          );
+              [playerId, event.currency_reward, event.currency_reward]
+            );
 
-          await db.runAsync(
-            `INSERT INTO currency_audit 
+            await db.runAsync(
+              `INSERT INTO currency_audit 
                (player_id, amount_changed, source, source_id, modified_by, modified_at, reason)
                VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
-              playerId,
-              event.reward,
-              "event",
-              event.event_id,
-              "system",
-              now,
-              `Completed event: ${event.name}`,
-            ]
-          );
+              [
+                playerId,
+                event.currency_reward,
+                "event",
+                event.event_id,
+                "system",
+                now,
+                `Completed event: ${event.name}`,
+              ]
+            );
+          }
 
-          // ✅ Defer achievement check
+          if (event.match_point_reward > 0) {
+            await db.runAsync(
+              `INSERT OR IGNORE INTO match_completion_awards
+               (match_id, player_id, awarded_at, points, modified_by, action_type)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+              [
+                `event-${event.event_id}`,
+                playerId,
+                now,
+                event.match_point_reward,
+                "system",
+                "event_reward",
+              ]
+            );
+          }
+
+          try {
+            const user = await client.users.fetch(playerId);
+            const channel = await client.channels.fetch(
+              process.env.QUEUE_ALERT_CHANNEL
+            );
+
+            if (channel?.isTextBased()) {
+              const rewardDisplay = [
+                event.currency_reward ? `💰 ${event.currency_reward}` : "",
+                event.match_point_reward
+                  ? `🏅 ${event.match_point_reward}`
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" + ");
+
+              const embed = new EmbedBuilder()
+                .setColor(0x3b82f6)
+                .setAuthor({
+                  name: `${user.username} completed an event!`,
+                  iconURL: user.displayAvatarURL(),
+                })
+                .setTitle(`🎯 ${event.name}`)
+                .setDescription(`**${event.description || "Ongoing event"}**`)
+                .addFields(
+                  {
+                    name: "Progress",
+                    value: `${newProgress}/${event.goal_target}`,
+                    inline: true,
+                  },
+                  { name: "Reward", value: rewardDisplay || "—", inline: true }
+                )
+                .setFooter({ text: "Event participation rewarded" })
+                .setTimestamp();
+
+              await channel.send({
+                content: `<@${playerId}> just earned event progress!`,
+                embeds: [embed],
+              });
+            }
+          } catch (err) {
+            logger.warn("⚠️ Failed to send flat reward alert", err);
+          }
+
           setImmediate(() =>
             checkCurrencyAchievements(playerId, db).catch((err) =>
               logger.error("❌ Currency achievement check failed (flat)", {
@@ -178,15 +378,7 @@ async function evaluateEventProgress(
           );
         }
 
-        // 🎖️ Event completion achievements (inline okay)
-        try {
-          await checkEventCompletionAchievements(playerId);
-        } catch (err) {
-          logger.error("❌ Failed to check event completion achievements", {
-            playerId,
-            error: err,
-          });
-        }
+        await checkEventCompletionAchievements(playerId);
       } catch (eventError) {
         logger.error("❌ Failed to evaluate progress for event", {
           playerId,

@@ -15,7 +15,7 @@ module.exports = {
     try {
       const player = await getPlayerById(playerId);
       if (!player) {
-        return interaction
+        await interaction
           .reply({
             content: "You're not currently in the matchmaking queue.",
             flags: 64,
@@ -26,10 +26,11 @@ module.exports = {
               error: err.message,
             })
           );
+        return;
       }
 
       if (player.status === "active") {
-        return interaction
+        await interaction
           .reply({
             content:
               "❌ You are in an active match and cannot leave the queue.",
@@ -41,6 +42,7 @@ module.exports = {
               error: err.message,
             })
           );
+        return;
       }
 
       await interaction.deferUpdate().catch((err) =>

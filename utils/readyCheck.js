@@ -25,8 +25,34 @@ const {
 
 async function initiateReadyCheck(thread, players) {
   try {
+    let statusMessage = null;
+
+    const updateReadyStatus = async () => {
+      if (!thread?.id || !thread.guild || !statusMessage?.editable) return;
+
+      const ready = getReadyPlayers(thread.id);
+      const total = players.length;
+      const readyCount = players.filter((id) => ready.has(id)).length;
+      const unready = players.filter((id) => !ready.has(id));
+
+      const content =
+        `✅ **Ready Status:** \`${readyCount} / ${total} players ready\`\n` +
+        (unready.length
+          ? `👥 Waiting on: ${unready.map((id) => `<@${id}>`).join(", ")}`
+          : "🎉 Everyone is ready!");
+
+      try {
+        await statusMessage.edit({ content });
+      } catch (err) {
+        logger.warn("⚠️ Failed to update ready status message", {
+          threadId: thread.id,
+        });
+      }
+    };
     const timeLimit = 180000;
     const warningIntervals = [120000, 60000, 10000];
+    const warningTimeouts = [];
+
     const initiator = getReadyCheckInitiator(thread.id);
 
     const isValidThread = (t) => t?.guild && t.isThread();
@@ -89,6 +115,13 @@ async function initiateReadyCheck(thread, players) {
       components: [button],
     });
 
+    statusMessage = await thread.send(
+      "✅ **Ready Status:** `0 / " +
+        players.length +
+        " players ready`\n👥 Waiting on: " +
+        players.map((id) => `<@${id}>`).join(", ")
+    );
+
     const collector = thread.createMessageComponentCollector({
       componentType: ComponentType.Button,
       time: timeLimit,
@@ -109,6 +142,13 @@ async function initiateReadyCheck(thread, players) {
         } = require("./handleReadyConfirmation");
         await i.deferUpdate().catch(() => {});
         await handleReadyConfirmation(thread, i.user.id, "collector", i);
+        await updateReadyStatus();
+
+        const readySet = getReadyPlayers(thread.id);
+        const allReady = players.every((id) => readySet.has(id));
+        if (allReady) {
+          collector.stop("all_ready");
+        }
       } catch (err) {
         logger.errorWrapper("ReadyCheck_CollectorError", err);
       }
@@ -116,16 +156,23 @@ async function initiateReadyCheck(thread, players) {
 
     warningIntervals.reverse().forEach((ms, i) => {
       const label = i === 0 ? "10 seconds" : i === 1 ? "1 minute" : "2 minutes";
-      setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         const unready = players.filter(
           (id) => !getReadyPlayers(thread.id).has(id)
         );
         sendWarningMessage(thread, unready, label);
       }, timeLimit - ms);
+      warningTimeouts.push(timeoutId);
     });
 
-    collector.on("end", async () => {
+    collector.on("end", async (_collected, reason) => {
       try {
+        logger.info("🛑 Ready check ended", {
+          threadId: thread.id,
+          reason,
+        });
+
+        warningTimeouts.forEach(clearTimeout);
         if (!isValidThread(thread)) return;
 
         const readyPlayers = getReadyPlayers(thread.id);
@@ -139,10 +186,22 @@ async function initiateReadyCheck(thread, players) {
         const confirmedReady = activePlayers.filter((id) =>
           readyPlayers.has(id)
         );
+        await statusMessage
+          .edit({
+            content: `✅ **Ready Check Concluded!**\n${confirmedReady.length} / ${players.length} players confirmed.`,
+            components: [],
+          })
+          .catch((err) => {
+            logger.warn("⚠️ Failed to edit ready status message on end", {
+              threadId: thread.id,
+              error: err.message,
+            });
+          });
 
         if (unready.length === activePlayers.length) {
           await safeSend(thread, "❌ No one responded. Match will be closed.");
           const voiceChannelId = await getVoiceId(thread.id);
+
           return cleanupMatch({ thread, voiceChannelId });
         }
 
@@ -232,11 +291,58 @@ async function initiateReadyCheck(thread, players) {
             });
 
           if (enoughSubs) {
-            await safeSend(
-              thread,
-              `🔍 Searching for ${unready.length} replacement(s)...`
+            const {
+              ActionRowBuilder,
+              ButtonBuilder,
+              ButtonStyle,
+            } = require("discord.js");
+
+            const row = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId("update_match_preferences")
+                .setLabel("Update Match Preferences")
+                .setStyle(ButtonStyle.Secondary),
+              new ButtonBuilder()
+                .setCustomId("find_replacement")
+                .setLabel("Find Replacement from Queue")
+                .setStyle(ButtonStyle.Primary),
+              new ButtonBuilder()
+                .setCustomId("end_match_now")
+                .setLabel("End Match Immediately")
+                .setStyle(ButtonStyle.Danger)
             );
-            await searchCommand.searchForPlayers(thread, unready.length);
+
+            const prefMap = new Map();
+
+            for (const playerId of unready) {
+              const prefRow = await db.getAsync(
+                `SELECT nightlords FROM queue_preferences WHERE player_id = ? ORDER BY selected_at DESC LIMIT 1`,
+                [playerId]
+              );
+              if (prefRow?.nightlords) {
+                const bossList = prefRow.nightlords
+                  .split(",")
+                  .map((b) => `• ${b.trim()}`)
+                  .join("\n");
+                prefMap.set(playerId, bossList);
+              }
+            }
+
+            const preferenceDisplay = Array.from(prefMap.entries())
+              .map(
+                ([playerId, bossList]) =>
+                  `🧠 <@${playerId}>'s preferences:\n${
+                    bossList || "*No preferences found*"
+                  }`
+              )
+              .join("\n\n");
+
+            await safeSend(thread, {
+              content:
+                `⚠️ Replacement needed for ${unready.length} kicked player(s).\n\n${preferenceDisplay}\n\n` +
+                `What would you like to do?`,
+              components: [row],
+            });
           } else {
             await safeSend(thread, "⚠️ Not enough replacements available.");
           }
@@ -249,7 +355,6 @@ async function initiateReadyCheck(thread, players) {
               disqualified: false,
             });
 
-            // 🏆 Unlock "All By Myself 🎶" if they were the only one ready
             if (confirmedReady.length === 1) {
               await unlockAchievementIfNotEarned(id, "solo_ready");
             }
@@ -271,11 +376,9 @@ async function initiateReadyCheck(thread, players) {
         }
 
         if (confirmedReady.length === activePlayers.length) {
-          await safeSend(thread, "✅ All players are ready. Match continues!");
-        } else {
           await safeSend(
             thread,
-            `✅ Match continues with ${activePlayers.length} active player(s).`
+            "✅ **All players confirmed!** The match will now proceed."
           );
         }
       } catch (endErr) {

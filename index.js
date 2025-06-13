@@ -23,6 +23,7 @@ const handleInteraction = require("./interactions/interactionCreate");
 const { cleanupMatches } = require("./utils/matchmakingUtils/matchUtils");
 const eventsPath = path.join(__dirname, "interactions", "events");
 const threadMemberUpdateHandler = require("./interactions/events/threadMemberUpdate");
+const scheduleHourlyMessage = require("./hourlyMessage");
 
 const eventFiles = fs
   .readdirSync(eventsPath)
@@ -111,6 +112,7 @@ for (const file of commandFiles) {
 
 client.on("ready", async () => {
   logger.info(`Logged in as: ${client.user.tag}`);
+
   try {
     const guild = client.guilds.cache.first();
     await guild.commands.set(commandDataArray);
@@ -118,6 +120,9 @@ client.on("ready", async () => {
   } catch (err) {
     logger.errorWrapper("RegisterCommands", err);
   }
+
+  // ✅ Start hourly reminder loop
+  scheduleHourlyMessage(client);
 });
 
 //TTS test function
@@ -189,3 +194,5 @@ global.client = client;
 client.guilds.cache.forEach(async (guild) => {
   console.log(`Checking guild: ${guild.name}`);
 });
+
+console.log("🔁 Registered interactionCreate");

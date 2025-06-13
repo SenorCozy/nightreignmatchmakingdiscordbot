@@ -3,6 +3,10 @@ const logger = require("../../logger");
 const { ButtonStyle, ActionRowBuilder, ButtonBuilder } = require("discord.js");
 const shopVendors = require("../../data/shopVendors");
 const { getRecentVendor } = require("../../utils/shopUtils");
+const { logCurrencyChange } = require("../../utils/logCurrencyChange");
+const {
+  unlockAchievementIfNotEarned,
+} = require("../../utils/achievementHelpers");
 
 module.exports = {
   customIdRegex: /^buy_role_/,
@@ -61,25 +65,56 @@ module.exports = {
       );
 
       const member = await guild.members.fetch(userId);
-      await member.roles.add(roleId);
+      try {
+        await member.roles.add(roleId);
+      } catch (err) {
+        logger.errorWrapper("❌ Failed to assign role", err, {
+          roleId,
+          userId,
+        });
+
+        return interaction.reply({
+          content: `✅ You were charged **${adjustedPrice}** 🪙, but I couldn't assign the role. Please contact a mod.`,
+          flags: 64,
+        });
+      }
 
       await db.runAsync(
         `INSERT INTO player_purchases (player_id, role_id, purchased_at) VALUES (?, ?, ?)`,
         [userId, roleId, Date.now()]
       );
 
-      await db.runAsync(
-        `INSERT INTO currency_audit (player_id, amount_changed, source, source_id, modified_by, modified_at, reason)
-         VALUES (?, ?, 'shop', ?, ?, ?, ?)`,
-        [
-          userId,
-          -adjustedPrice,
-          roleId,
-          userId,
-          Date.now(),
-          `Purchased ${roleData.name} from ${vendor.name}`,
-        ]
-      );
+      // 🧾 Audit the transaction
+      await logCurrencyChange({
+        playerId: userId,
+        amount: -adjustedPrice,
+        source: "shop",
+        source_id: roleId,
+        modified_by: userId,
+        reason: `Purchased ${roleData.name} from ${vendor.name}`,
+      });
+
+      // 🏆 Trigger achievements
+      setImmediate(() => {
+        const achievementsToCheck = [
+          "currency_spent_100",
+          "currency_spent_400",
+          "currency_zero",
+          "store_buy_1",
+          "store_buy_3",
+          "store_buy_5",
+          "store_buy_8",
+        ];
+
+        for (const id of achievementsToCheck) {
+          unlockAchievementIfNotEarned(userId, id).catch((err) =>
+            logger.errorWrapper("Achievement unlock failed", err, {
+              playerId: userId,
+              achievementId: id,
+            })
+          );
+        }
+      });
 
       return interaction.reply({
         content: `🎉 You purchased **${roleData.name}** for **${adjustedPrice}** 🪙 from **${vendor.name}**!`,

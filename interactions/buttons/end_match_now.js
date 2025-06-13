@@ -16,7 +16,7 @@ module.exports = {
     try {
       await interaction.deferReply({ flags: 64 }).catch(() => {});
 
-      // ✅ Disable both buttons in the original message
+      // ✅ Disable buttons
       const disabledRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId("end_match_now")
@@ -34,18 +34,17 @@ module.exports = {
         .edit({
           components: [disabledRow],
         })
-        .catch((err) => {
+        .catch((err) =>
           logger.warn("⚠️ Failed to disable match decision buttons", {
             threadId: thread.id,
             error: err.message,
-          });
-        });
+          })
+        );
 
-      // ✅ Ensure thread still exists
+      // ✅ Confirm thread still exists
       const stillExists = await thread.guild.channels
         .fetch(thread.id)
         .catch(() => null);
-
       if (!stillExists) {
         logger.warn("⚠️ end_match_now triggered but thread no longer exists", {
           threadId: thread.id,
@@ -54,16 +53,13 @@ module.exports = {
         return;
       }
 
-      // ✅ Retrieve match info from DB
-      const dbResult = await new Promise((resolve, reject) => {
-        db.get(
-          `SELECT voiceChannelId FROM channels WHERE threadId = ?`,
-          [thread.id],
-          (err, row) => (err ? reject(err) : resolve(row))
-        );
-      });
+      // ✅ Retrieve voice channel ID
+      const result = await db.getAsync(
+        `SELECT voiceChannelId FROM channels WHERE threadId = ?`,
+        [thread.id]
+      );
 
-      if (!dbResult) {
+      if (!result) {
         logger.warn("⚠️ No match found for thread during end_match_now", {
           threadId: thread.id,
           userId,
@@ -74,7 +70,7 @@ module.exports = {
         return;
       }
 
-      // ✅ Proceed with match cleanup
+      // ✅ Cleanup match
       logger.info("🛑 Match force-ended via button", {
         threadId: thread.id,
         userId,
@@ -83,7 +79,7 @@ module.exports = {
 
       await cleanupMatch({
         thread,
-        voiceChannelId: dbResult.voiceChannelId,
+        voiceChannelId: result.voiceChannelId,
         closedByUserOrBot: interaction.user,
         closureReason: "Ended via End Match Now button",
       });

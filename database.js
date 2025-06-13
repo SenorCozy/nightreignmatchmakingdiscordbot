@@ -3,6 +3,7 @@ const path = require("path");
 const fs = require("fs");
 const cron = require("node-cron");
 const logger = require("./logger");
+const uploadLatestBackup = require("./dbBackupUploader");
 
 // Path to the database
 const dbPath = path.join(__dirname, "matchmaking.db");
@@ -37,7 +38,19 @@ const db = new sqlite3.Database(dbPath, (err) => {
         last_queue_exit_at INTEGER DEFAULT NULL
       )
     `);
-
+    db.run(`CREATE TABLE IF NOT EXISTS queue_preferences (
+  player_id TEXT PRIMARY KEY,
+  nightlords TEXT NOT NULL, -- comma-separated list of boss IDs/names
+  vc_ok INTEGER DEFAULT 1, -- 1 = ok with VC, 0 = prefer no VC
+  selected_at INTEGER NOT NULL -- timestamp for recency tracking
+)
+`);
+    db.run(`CREATE TABLE IF NOT EXISTS nightlords (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  unlock_order INTEGER,
+  released_at INTEGER DEFAULT NULL
+)`);
     db.run(`
       CREATE TABLE IF NOT EXISTS queue_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,43 +102,46 @@ const db = new sqlite3.Database(dbPath, (err) => {
     `);
 
     db.run(`
-      CREATE TABLE IF NOT EXISTS events (
-        event_id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        description TEXT,
-        goal_type TEXT NOT NULL,
-        start_time INTEGER NOT NULL,
-        end_time INTEGER NOT NULL,
-        event_type TEXT DEFAULT 'one_time',
-        active INTEGER DEFAULT 1,
-        reward INTEGER,
-        goal_target INTEGER,
-        cooldown_ms INTEGER DEFAULT 0
-      )
-    `);
+  CREATE TABLE IF NOT EXISTS events (
+    event_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    goal_type TEXT NOT NULL,
+    start_time INTEGER NOT NULL,
+    end_time INTEGER NOT NULL,
+    event_type TEXT DEFAULT 'one_time',
+    active INTEGER DEFAULT 1,
+    currency_reward INTEGER DEFAULT 0,
+    match_point_reward INTEGER DEFAULT 0,
+    goal_target INTEGER,
+    cooldown_ms INTEGER DEFAULT 0
+  )
+`);
 
     db.run(`
-      CREATE TABLE IF NOT EXISTS event_tiers (
-        tier_id TEXT PRIMARY KEY,
-        event_id TEXT NOT NULL,
-        tier_index INTEGER NOT NULL,
-        goal_target INTEGER NOT NULL,
-        reward INTEGER NOT NULL,
-        FOREIGN KEY (event_id) REFERENCES events(event_id)
-      )
-    `);
+  CREATE TABLE IF NOT EXISTS event_tiers (
+    tier_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    tier_index INTEGER NOT NULL,
+    goal_target INTEGER NOT NULL,
+    currency_reward INTEGER DEFAULT 0,
+    match_point_reward INTEGER DEFAULT 0,
+    FOREIGN KEY (event_id) REFERENCES events(event_id)
+  )
+`);
 
+    // Tracks player progress in active events
     db.run(`
-      CREATE TABLE IF NOT EXISTS event_progress (
-        player_id TEXT NOT NULL,
-        event_id TEXT NOT NULL,
-        progress INTEGER DEFAULT 0,
-        completed INTEGER DEFAULT 0,
-        last_tier_index_awarded INTEGER DEFAULT 0,
-        last_increment_at INTEGER DEFAULT 0,
-        PRIMARY KEY (player_id, event_id)
-      )
-    `);
+  CREATE TABLE IF NOT EXISTS event_progress (
+    player_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    progress INTEGER DEFAULT 0,
+    completed INTEGER DEFAULT 0,
+    last_tier_index_awarded INTEGER DEFAULT 0,
+    last_increment_at INTEGER DEFAULT 0,
+    PRIMARY KEY (player_id, event_id)
+  )
+`);
 
     db.run(`
       CREATE TABLE IF NOT EXISTS event_submissions (
@@ -202,6 +218,14 @@ const db = new sqlite3.Database(dbPath, (err) => {
         price INTEGER NOT NULL
       )
     `);
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS active_display_role (
+  player_id TEXT PRIMARY KEY,
+  role_id TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+`);
 
     db.run(`
       CREATE TABLE IF NOT EXISTS player_purchases (
@@ -329,7 +353,9 @@ const db = new sqlite3.Database(dbPath, (err) => {
         closure_reason TEXT DEFAULT NULL,
         match_start_time INTEGER DEFAULT 0,
         formation_type TEXT DEFAULT NULL,
-        initial_player_ids TEXT
+        initial_player_ids TEXT,
+        shared_nightlords TEXT,
+        vc_match INTEGER
       )
     `);
 
@@ -358,7 +384,9 @@ const db = new sqlite3.Database(dbPath, (err) => {
         initial_player_ids TEXT DEFAULT NULL,
         interim_player_ids TEXT DEFAULT NULL,
         final_player_ids TEXT DEFAULT NULL,
-        platform TEXT DEFAULT NULL
+        platform TEXT DEFAULT NULL,
+        vc_respected INTEGER DEFAULT NULL,
+        shared_nightlords TEXT DEFAULT NULL
       )
     `);
 
@@ -402,53 +430,64 @@ const db = new sqlite3.Database(dbPath, (err) => {
   });
 });
 
-// Daily backup job
-cron.schedule("0 0 * * *", () => {
+const backupRetentionDays = 7;
+
+// Ensure backup directory exists
+if (!fs.existsSync(backupDir)) {
+  fs.mkdirSync(backupDir);
+}
+
+function createTimestampedBackup() {
   const timestamp = new Date().toISOString().replace(/:/g, "-");
   const backupFile = path.join(backupDir, `matchmaking-backup-${timestamp}.db`);
-  const backupRetentionDays = 7;
 
-  fs.readdir(backupDir, (err, files) => {
+  fs.copyFile(dbPath, backupFile, (err) => {
     if (err) {
-      logger.error("Failed to read backup directory:", err.message);
-      return;
+      logger.errorWrapper("❌ DB Backup Failed", err);
+    } else {
+      console.log(`📦 Backup created: ${backupFile}`);
+      uploadLatestBackup(); // 🔁 Send to Discord after creation
     }
+  });
+
+  // Cleanup old backups
+  fs.readdir(backupDir, (err, files) => {
+    if (err)
+      return logger.warn("⚠️ Failed to read backup dir", {
+        error: err.message,
+      });
 
     files.forEach((file) => {
       const filePath = path.join(backupDir, file);
       fs.stat(filePath, (err, stats) => {
-        if (err) {
-          logger.error(`Failed to stat file ${file}:`, err.message);
-          return;
-        }
-
-        const fileAgeInDays =
-          (Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
-        if (fileAgeInDays > backupRetentionDays) {
+        if (err) return;
+        const ageDays = (Date.now() - stats.mtimeMs) / (1000 * 60 * 60 * 24);
+        if (ageDays > backupRetentionDays) {
           fs.unlink(filePath, (err) => {
-            if (err) {
-              logger.error(`Failed to delete old backup ${file}:`, err.message);
-            } else {
-              console.log(`Deleted old backup: ${file}`);
-            }
+            if (!err) console.log(`🗑️ Deleted old backup: ${file}`);
           });
         }
       });
     });
   });
+}
 
-  fs.copyFile(dbPath, backupFile, (err) => {
-    if (err) {
-      logger.error("Failed to back up the database:", err.message);
-    } else {
-      console.log(`Database backed up successfully to ${backupFile}`);
-    }
-  });
-});
+// ✅ Only schedule cron if this is the entry file (not when required)
+if (require.main === module) {
+  cron.schedule("0 */6 * * *", createTimestampedBackup);
+}
 
 const { promisify } = require("util");
 
-db.runAsync = promisify(db.run.bind(db));
+db.runAsync = (sql, params = []) => {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      if (err) return reject(err);
+      resolve({ changes: this.changes });
+    });
+  });
+};
+
 db.getAsync = promisify(db.get.bind(db));
 db.allAsync = promisify(db.all.bind(db));
 

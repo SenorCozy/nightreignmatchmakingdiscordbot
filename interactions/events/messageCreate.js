@@ -294,6 +294,17 @@ module.exports = {
     for (const user of mentionedUsers.values()) {
       const mentionedId = user.id;
 
+      // Skip bot or moderators
+      const mentionedMember = await thread.guild.members
+        .fetch(mentionedId)
+        .catch(() => null);
+      const isModerator = mentionedMember?.roles.cache.some((role) =>
+        MODERATOR_ROLE_IDS.includes(role.id)
+      );
+      const isBot = user.bot;
+
+      if (isBot || isModerator) continue; // ✅ exempt bots & mods
+
       if (!activePlayerIds.includes(mentionedId)) {
         try {
           await thread.members.remove(mentionedId).catch(() => {});

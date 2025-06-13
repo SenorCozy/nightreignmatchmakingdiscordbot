@@ -27,7 +27,7 @@ passport.use(
     {
       clientID: process.env.CLIENT_ID,
       clientSecret: process.env.CLIENT_SECRET,
-      callbackURL: "http://localhost:3000/auth/discord/callback",
+      callbackURL: `${process.env.PUBLIC_URL}/auth/discord/callback`,
       scope: ["identify", "guilds", "guilds.members.read"],
     },
     (accessToken, refreshToken, profile, done) => {
@@ -93,6 +93,6 @@ app.post("/backup", checkAuth, (req, res) => {
 });
 
 // 🚀 Launch Server
-app.listen(PORT, () => {
-  console.log(`🌐 Dashboard running at http://localhost:${PORT}`);
+app.listen(PORT, "127.0.0.1", () => {
+  console.log(`🌐 Dashboard running at http://127.0.0.1:${PORT}`);
 });

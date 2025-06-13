@@ -60,10 +60,10 @@ module.exports = {
         : "🏅 MVPs Received: 0";
 
       const roleThresholds = [
-        { label: "Tier I Initiate", points: 100 },
-        { label: "Tier II Veteran", points: 250 },
-        { label: "Tier III Champion", points: 500 },
-        { label: "Tier IV Legend", points: 1000 },
+        { label: "Tier I Nightfarer", points: 100 },
+        { label: "Tier II Remembrance Bearer", points: 250 },
+        { label: "Tier III Limveld Adept", points: 500 },
+        { label: "Tier IV Champion of the Night", points: 1000 },
       ];
 
       let currentTier = "Unranked";
