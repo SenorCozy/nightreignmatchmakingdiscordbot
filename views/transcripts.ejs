@@ -32,15 +32,26 @@
         <tbody>
           <% transcripts.forEach((t, index) => { %>
           <tr>
-            <td><%= totalCount - offset - index %></td>
+            <td><%= offset + index + 1 %></td>
             <td><%= new Date(t.created_at).toLocaleString() %></td>
             <td><%= new Date(t.closed_at).toLocaleString() %></td>
             <td><%= t.closure_reason || "N/A" %></td>
             <td><%= t.platform || "Unknown" %></td>
             <td>
-              <strong>Initial:</strong> <%= t.initial_player_ids || "N/A" %><br />
-              <strong>Interim:</strong> <%= t.interim_player_ids || "None" %><br />
-              <strong>Final:</strong> <%= t.final_player_ids || "None" %>
+              <div style="display: flex; flex-direction: column; gap: 4px">
+                <div>
+                  <strong>Initial:</strong>
+                  <span><%= t.initial_player_ids || "N/A" %></span>
+                </div>
+                <div>
+                  <strong>Interim:</strong>
+                  <span><%= t.interim_player_ids || "None" %></span>
+                </div>
+                <div>
+                  <strong>Final:</strong>
+                  <span><%= t.final_player_ids || "None" %></span>
+                </div>
+              </div>
             </td>
 
             <td>

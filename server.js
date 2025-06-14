@@ -49,9 +49,6 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
-// 🌐 Static Files
-app.use(express.static(path.join(__dirname, "public")));
-
 // 🎨 Templating
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));

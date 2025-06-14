@@ -9,7 +9,6 @@ const logger = require("./logger");
 const { setupRecurringEventHandler } = require("./utils/eventUtils");
 
 const {
-  joinVoiceChannel,
   createAudioPlayer,
   createAudioResource,
   VoiceConnectionStatus,
@@ -17,8 +16,6 @@ const {
 } = require("@discordjs/voice");
 const { checkThreadIntegrity } = require("./utils/threadIntegrityChecker");
 
-const googleTTS = require("google-tts-api"); // TTS API to generate speech
-const { createAudioStream } = require("prism-media"); // Convert to audio stream
 const handleInteraction = require("./interactions/interactionCreate");
 const { cleanupMatches } = require("./utils/matchmakingUtils/matchUtils");
 const eventsPath = path.join(__dirname, "interactions", "events");
@@ -110,8 +107,20 @@ for (const file of commandFiles) {
   }
 }
 
+// clean up inactive matches function scans for matches to clean up then executes cleanupmatch
+setInterval(() => cleanupMatches(client), 300000);
+// Run every 5 minutes CHANGE BACK!!
+setupRecurringEventHandler();
+
+// STATISTICS
+// Player statistics
+
+// bot login token
+client.login(process.env.BOT_TOKEN);
 client.on("ready", async () => {
   logger.info(`Logged in as: ${client.user.tag}`);
+  console.log(`Logged in as: ${client.user.tag}`);
+  console.log(`Connected to ${client.guilds.cache.size} guilds.`);
 
   try {
     const guild = client.guilds.cache.first();
@@ -123,69 +132,11 @@ client.on("ready", async () => {
 
   // ✅ Start hourly reminder loop
   scheduleHourlyMessage(client);
-});
 
-//TTS test function
-async function announceVCWarning(voiceChannel, message) {
-  if (!voiceChannel) return console.error("No valid voice channel provided.");
-
-  // ✅ Generate TTS audio URL
-  const ttsUrl = googleTTS.getAudioUrl(message, {
-    lang: "en",
-    slow: false,
-    host: "https://translate.google.com",
+  // 🔁 Report connected guilds
+  client.guilds.cache.forEach((guild) => {
+    console.log(`Checking guild: ${guild.name}`);
   });
-
-  // ✅ Create a voice connection
-  const connection = joinVoiceChannel({
-    channelId: voiceChannel.id,
-    guildId: voiceChannel.guild.id,
-    adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-    selfDeaf: false, // Keep bot undeafened to interact
-  });
-
-  connection.on(VoiceConnectionStatus.Ready, () => {
-    console.log("🔊 Bot is ready in the VC!");
-  });
-
-  // ✅ Create an audio player
-  const player = createAudioPlayer();
-  const resource = createAudioResource(ttsUrl); // Load the TTS URL
-
-  // ✅ Handle audio events
-  player.on(AudioPlayerStatus.Idle, () => {
-    console.log("✅ Finished playing the message. Leaving VC...");
-    connection.destroy(); // Leave the VC
-  });
-
-  player.on("error", (err) => {
-    console.error("❌ Error in voice playback:", err);
-    connection.destroy();
-  });
-
-  // ✅ Play the TTS message
-  player.play(resource);
-  connection.subscribe(player);
-}
-
-// clean up inactive matches function scans for matches to clean up then executes cleanupmatch
-setInterval(() => cleanupMatches(client), 10000);
-// Run every 5 minutes CHANGE BACK!!
-setupRecurringEventHandler();
-
-setTimeout(() => {
-  setInterval(() => checkThreadIntegrity(client), 480000); // runs every 10s
-}, 30000); // wait 30s before starting the loop
-// 3 minutes CHANGE BACK
-
-// STATISTICS
-// Player statistics
-
-// bot login token
-client.login(process.env.BOT_TOKEN);
-client.on("ready", async () => {
-  console.log(`Logged in as: ${client.user.tag}`);
-  console.log(`Connected to ${client.guilds.cache.size} guilds.`);
 });
 
 global.client = client;
